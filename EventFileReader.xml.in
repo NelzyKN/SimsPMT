@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+
+<!-- Configuration of MinimalModule EventFileReader -->
+
+<EventFileReader
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:noNamespaceSchemaLocation='@SCHEMALOCATION@/EventFileReader.xsd'>
+
+  <ReportFilenames/>
+
+  <CORSIKA>
+
+    <!-- Read proton showers at 10^17.0 eV (0.1 EeV) -->
+    <InputFilenames>
+      `find /afs/auger.mtu.edu/common/data/pauger_SIM_SHOWERS/protons/corsika_77420_Auger_lib/SibyllStar/18.0_18.5/proton/ -type f -name "DAT*" ! -name "*.*" `
+    </InputFilenames>
+
+    <PatternPath> * </PatternPath>
+    
+    <InputMapping>
+      <GroundData> (1) </GroundData>
+    </InputMapping>    
+    
+  </CORSIKA>
+
+</EventFileReader>

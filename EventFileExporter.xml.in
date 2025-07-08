@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+
+<!-- Configuration of MinimalModule EventFileExporter -->
+
+<EventFileExporter
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:noNamespaceSchemaLocation='@SCHEMALOCATION@/EventFileExporter.xsd'>
+
+  <OutputFileType> Offline </OutputFileType>
+
+  <OutputFilename> simulation_with_traces.root </OutputFilename>
+
+  <!-- Switches to control what data to save -->
+  <StreamerSwitches>
+    <FDRaw> off </FDRaw>
+    <FDSimTraces> off </FDSimTraces>
+    <FDSimTelescope> off </FDSimTelescope>
+    <SDSimPEHisto> on </SDSimPEHisto>
+    <SDSimPMTBaseHisto> on </SDSimPMTBaseHisto>
+    <SDSimPMTFilterHisto> on </SDSimPMTFilterHisto>
+    <SDSimTankParticles> on </SDSimTankParticles>
+  </StreamerSwitches>
+
+</EventFileExporter>

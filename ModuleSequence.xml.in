@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+
+<!-- Module sequence for generating PMT traces from CORSIKA showers -->
+
+<!DOCTYPE sequenceFile [
+  <!ENTITY % sd SYSTEM "@CONFIGDIR@/standardSdSequences.dtd">
+  %sd;
+] >
+
+<sequenceFile
+   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+   xsi:noNamespaceSchemaLocation='@SCHEMALOCATION@/ModuleSequence.xsd'>
+
+  <enableTiming/>
+
+  <moduleControl>
+
+    <!-- Process up to 1000 showers -->
+    <loop numTimes='1000' pushEventToStack="yes">
+
+      <!-- Read CORSIKA shower files -->
+      <module> EventFileReaderOG </module>
+
+      <!-- Generate random core position on array -->
+      <module> EventGeneratorOG </module>
+
+      <!-- Simulate muon background (accidental triggers) -->
+      <module> SdAccidentalInjectorKG </module>
+      
+      <!-- Initial G4 simulation of particles in tank -->
+      <module> G4StationSimulatorOG </module>
+
+      <!-- Regenerate particles that need further processing -->
+      <loop numTimes="unbounded" pushEventToStack="no">
+        <module> CachedShowerRegeneratorOG </module>
+        <module> G4StationSimulatorOG </module>
+      </loop>
+      
+      <!-- Fill calibration data -->
+      <module> SdSimulationCalibrationFillerOG </module>
+      
+      <!-- Simulate PMT response -->
+      <module> SdPMTSimulatorOG </module>
+      
+      <!-- Simulate FADC and filtering -->
+      <module> SdFilterFADCSimulatorMTU </module>
+      
+      <!-- Generate baseline noise -->
+      <module> SdBaselineSimulatorOG </module>
+      
+      <!-- Tank trigger simulation -->
+      <!-- <module> StationTriggerSimulatorOG </module> -->
+      
+      <!-- Our trace extraction module -->
+      <module> PMTTraceModule </module>
+      
+      <!-- Clear particle lists for next event -->
+      <module> ClearParticleLists </module>
+      
+      <!-- Export if needed -->
+      <module> EventFileExporterOG </module>
+
+    </loop>
+
+  </moduleControl>
+
+</sequenceFile>

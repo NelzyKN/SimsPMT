@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+
+<!DOCTYPE bootstrap [
+  <!ENTITY standardSdIdealDetConfig SYSTEM '@CONFIGDIR@/standardSdIdealDetConfig.xml'>
+  <!ENTITY standardSdSimModuleConfig SYSTEM '@CONFIGDIR@/standardSdSimModuleConfig.xml'>
+  <!ENTITY standardSdRecModuleConfig SYSTEM '@CONFIGDIR@/standardSdRecModuleConfig.xml'>
+]>
+
+<bootstrap xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:noNamespaceSchemaLocation='@SCHEMALOCATION@/bootstrap.xsd'
+           xmlns:xlink="http://www.auger.org/schema/types">
+
+  &standardSdIdealDetConfig;
+  &standardSdSimModuleConfig;
+  &standardSdRecModuleConfig;
+
+  <centralConfig>
+
+    <configLink
+      id         = "ModuleSequence"
+      type       = "XML"
+      xlink:href = "./ModuleSequence.xml"/>
+
+    <configLink
+      id         = "EventFileReader"
+      type       = "XML"
+      xlink:href = "./EventFileReader.xml"/>
+
+    <configLink
+      id         = "EventGenerator"
+      type       = "XML"
+      xlink:href = "./EventGenerator.xml"/>
+
+    <configLink 
+      id         = "EventFileExporter"
+      type       = "XML" 
+      xlink:href = "./EventFileExporter.xml"/>
+      
+
+    <configLink
+       id         = "SStationListXMLManager"
+       type       = "XML"
+       xlink:href = "@CONFIGDIR@/SIdealUpgradedStationList.xml"/>
+       <!-- xlink:href = "./SIdealUpgradedStationListNoSmallPMT.xml"/> -->
+       
+       <configLink
+       id         = "G4StationSimulator"
+       type       = "XML" 
+       xlink:href = "@CONFIGDIR@/G4StationSimulator.xml"/>
+
+
+
+  </centralConfig>
+
+  <parameterOverrides>
+    <!-- Empty for now - the standard configuration will work -->
+    <!-- The simulation will produce traces of whatever length is configured -->
+    <!-- Our PMTTraceModule already handles variable-length traces correctly -->
+  </parameterOverrides>
+
+</bootstrap>

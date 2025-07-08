@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+
+<!-- Configuration of MinimalModule EventGenerator -->
+
+<EventGenerator
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:noNamespaceSchemaLocation='@SCHEMALOCATION@/EventGenerator.xsd'>
+
+  <mode> SD </mode>
+
+  <eventIdentifier>
+    <libraryIdentifier> TraceGen </libraryIdentifier>
+    <format> Library_%1%:Run_%2%:Shower_%3%:Use_%4% </format>
+    <sdIdFormat> 2 2 </sdIdFormat>
+  </eventIdentifier>
+
+  <!-- Randomize core position over array -->
+  <coreRandomization>
+    <useRandomStation> 1 </useRandomStation>
+  </coreRandomization>
+
+  <!-- Time stamp of the core impact on ground -->
+  <eventTime> 2024-01-01T00:00:00.000000 </eventTime>  
+
+</EventGenerator>
