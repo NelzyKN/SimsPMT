@@ -15,6 +15,7 @@
 #include <sevt/PMT.h>
 #include <sevt/PMTSimData.h>
 #include <sevt/StationConstants.h>
+#include <sevt/StationTriggerData.h>
 
 #include <sdet/SDetector.h>
 #include <sdet/Station.h>
@@ -135,14 +136,14 @@ VModule::ResultFlag PMTTraceModule::Init()
     // Create histograms
     hEventEnergy = new TH1D("hEventEnergy", "Primary Energy;E [eV];Events", 100, 1e16, 1e20);
     hZenithAngle = new TH1D("hZenithAngle", "Zenith Angle;#theta [deg];Events", 90, 0, 90);
-    hNStations = new TH1D("hNStations", "Number of Stations;N;Events", 50, 0, 50);
+    hNStations = new TH1D("hNStations", "Number of Triggered Stations;N;Events", 50, 0, 50);
     hNTracesPerEvent = new TH1D("hNTracesPerEvent", "Traces per Event;N;Events", 150, 0, 150);
     hTraceLength = new TH1D("hTraceLength", "Trace Length;Bins;Entries", 200, 0, 2100);
-    hPeakValue = new TH1D("hPeakValue", "Peak Value;ADC;Entries", 200, 0, 500);  // Adjusted for lower baseline
-    hTotalCharge = new TH1D("hTotalCharge", "Total Charge;ADC;Entries", 200, 0, 10000);  // Adjusted
-    hVEMCharge = new TH1D("hVEMCharge", "VEM Charge;VEM;Entries", 200, 0, 100);  // Adjusted
+    hPeakValue = new TH1D("hPeakValue", "Peak Value;ADC;Entries", 200, 0, 1000);  // Increased range
+    hTotalCharge = new TH1D("hTotalCharge", "Total Charge;ADC;Entries", 200, 0, 50000);  // Increased range
+    hVEMCharge = new TH1D("hVEMCharge", "VEM Charge;VEM;Entries", 200, 0, 300);  // Increased range
     hChargeVsDistance = new TH2D("hChargeVsDistance", "Charge vs Distance;r [m];VEM", 
-                                 50, 0, 3000, 100, 0.1, 100);  // Adjusted VEM range
+                                 50, 0, 3000, 100, 0.1, 1000);  // Increased VEM range
     
     // Initialize trace histogram array
     fTraceHistograms = new TObjArray();
@@ -248,8 +249,28 @@ void PMTTraceModule::ProcessStations(const Event& event)
         const sevt::Station& station = *it;
         fStationId = station.GetId();
         
-        // For simulations, we're interested in stations that have simulation data
-        // This means they were hit by particles from the shower
+        // Check if station has trigger data and was actually triggered
+        if (!station.HasTriggerData()) {
+            continue;
+        }
+        
+        const sevt::StationTriggerData& triggerData = station.GetTriggerData();
+        
+        // Only process stations that actually triggered (T1 or T2)
+        // Skip silent triggers and error states
+        if (triggerData.IsSilent() || triggerData.GetErrorCode() != 0) {
+            continue;
+        }
+        
+        // Check if it's a valid trigger (T1 or T2)
+        bool isT1 = triggerData.IsT1();
+        bool isT2 = triggerData.IsT2();
+        
+        if (!isT1 && !isT2) {
+            continue;
+        }
+        
+        // For simulations, also check if station has simulation data
         if (!station.HasSimData()) {
             continue;
         }
@@ -271,6 +292,15 @@ void PMTTraceModule::ProcessStations(const Event& event)
         // Process PMTs
         int tracesThisStation = ProcessPMTs(station);
         nTracesThisEvent += tracesThisStation;
+        
+        if (fTracesFound <= 5 && tracesThisStation > 0) {
+            ostringstream msg;
+            msg << "Station " << fStationId << " triggered with " 
+                << (isT1 ? "T1" : "T2") << " trigger, "
+                << "Algorithm: " << triggerData.GetAlgorithmName()
+                << ", Distance: " << fDistance << " m";
+            INFO(msg.str());
+        }
     }
     
     if (nStations > 0) {
@@ -305,66 +335,28 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                 // Process the trace
                 fTraceData.clear();
                 
-                // First, determine the actual trace size
-                int actualTraceSize = 0;
-                try {
-                    actualTraceSize = trace.GetSize();
-                } catch (...) {
-                    // If GetSize() doesn't work, determine by iteration
-                    actualTraceSize = 0;
-                    for (int i = 0; i < 2048; i++) {
-                        try {
-                            (void)trace[i];
-                            actualTraceSize = i + 1;
-                        } catch (...) {
-                            break;
-                        }
-                    }
-                }
+                // Get the actual trace size - FADC traces should have 2048 bins
+                int traceSize = 2048;
                 
-                if (actualTraceSize <= 0) {
-                    continue;  // Skip empty traces
-                }
-                
-                // Debug output
-                if (fTracesFound < 5) {
-                    ostringstream msg;
-                    msg << "FADC actual trace size: " << actualTraceSize << ", First 20 values: ";
-                    for (int i = 0; i < TMath::Min(20, actualTraceSize); i++) {
-                        msg << trace[i] << " ";
-                    }
-                    msg << "... Last 5 values: ";
-                    for (int i = TMath::Max(0, actualTraceSize-5); i < actualTraceSize; i++) {
-                        msg << trace[i] << " ";
-                    }
-                    INFO(msg.str());
-                    
-                    // Check baseline level
-                    double baseline_sum = 0;
-                    int baseline_count = 0;
-                    for (int i = 0; i < 100 && i < actualTraceSize; i++) {
-                        baseline_sum += trace[i];
-                        baseline_count++;
-                    }
-                    if (baseline_count > 0) {
-                        ostringstream baseMsg;
-                        baseMsg << "Estimated baseline (first 100 bins): " << baseline_sum/baseline_count << " ADC";
-                        INFO(baseMsg.str());
-                    }
-                }
-                
-                // Process trace data - fill all 2048 bins
-                fTraceSize = 2048;  // Always use full size for histograms
+                // Read all trace data directly
+                fTraceSize = traceSize;
                 fPeakValue = 0;
                 fPeakBin = 0;
                 fTotalCharge = 0;
                 
-                // First, read actual trace data
-                for (int i = 0; i < actualTraceSize; i++) {
-                    double value = trace[i];
+                // Read the full trace
+                for (int i = 0; i < traceSize; i++) {
+                    double value = 0;
+                    try {
+                        value = trace[i];
+                    } catch (...) {
+                        // If we can't read this bin, use baseline
+                        value = 50.0;
+                    }
                     fTraceData.push_back(value);
                     
-                    double signal = value - 50.0;  // Baseline subtraction
+                    // For simulation, baseline is typically around 50 ADC
+                    double signal = value - 50.0;
                     if (signal > 0) {
                         fTotalCharge += signal;
                     }
@@ -375,18 +367,18 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                     }
                 }
                 
-                // Then fill the rest with baseline to reach 2048 bins
-                for (int i = actualTraceSize; i < 2048; i++) {
-                    fTraceData.push_back(50.0);  // Fill with baseline
-                }
-                
                 // Calculate VEM
                 fVEMCharge = fTotalCharge / 180.0;
                 
-                // Create histogram - always 2048 bins
+                // Only save traces with significant signals
+                if (fTotalCharge < 10.0) {
+                    continue;  // Skip traces with almost no signal
+                }
+                
+                // Create histogram
                 if (fTracesFound < fMaxHistograms) {
                     TString histName = Form("eventHist_%d", 1000000000 + fTracesFound);
-                    TString histTitle = Form("Histogram of Event %d, Station %d, PMT %d", 
+                    TString histTitle = Form("Event %d, Station %d, PMT %d", 
                                             fEventId, fStationId, fPmtId);
                     
                     TH1D* traceHist = new TH1D(histName, histTitle, 2048, 0, 2048);
@@ -394,23 +386,16 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                     traceHist->GetYaxis()->SetTitle("ADC");
                     traceHist->SetStats(kTRUE);
                     
-                    // Fill all 2048 bins
+                    // Fill histogram
                     for (int i = 0; i < 2048; i++) {
                         traceHist->SetBinContent(i+1, fTraceData[i]);
                     }
                     
                     fTraceHistograms->Add(traceHist);
-                    
-                    // Log actual vs displayed size
-                    if (fTracesFound < 5) {
-                        ostringstream msg;
-                        msg << "Created histogram with 2048 bins (actual data: " << actualTraceSize << " bins)";
-                        INFO(msg.str());
-                    }
                 }
                 
                 // Fill summary histograms
-                hTraceLength->Fill(actualTraceSize);  // Store actual data length
+                hTraceLength->Fill(fTraceSize);
                 hPeakValue->Fill(fPeakValue);
                 hTotalCharge->Fill(fTotalCharge);
                 hVEMCharge->Fill(fVEMCharge);
@@ -427,15 +412,16 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                 fTracesFound++;
                 tracesFound++;
                 
-                if (fTracesFound % 10 == 0) {
+                if (fTracesFound <= 5) {
                     ostringstream msg;
-                    msg << "Found " << fTracesFound << " traces so far";
+                    msg << "Found FADC trace: Station " << fStationId 
+                        << ", PMT " << fPmtId 
+                        << ", Peak: " << fPeakValue << " ADC at bin " << fPeakBin
+                        << ", Total charge: " << fTotalCharge 
+                        << ", VEM: " << fVEMCharge;
                     INFO(msg.str());
                 }
                 
-                if (fTracesFound <= 5) {
-                    INFO("Found FADC trace directly from PMT");
-                }
                 continue;
             } catch (const exception& e) {
                 // Direct PMT access failed
@@ -451,9 +437,7 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
         if (pmt.HasSimData()) {
             const PMTSimData& simData = pmt.GetSimData();
             
-            // Try different simulation data sources in order of preference
-            
-            // First try: FADC trace from simulation (post-filtering)
+            // Try FADC trace from simulation
             try {
                 if (simData.HasFADCTrace(sevt::StationConstants::eTotal)) {
                     const auto& fadcTrace = simData.GetFADCTrace(
@@ -472,25 +456,6 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
             } catch (const exception& e) {
                 // Simulation FADC access failed
             }
-            
-            // Second try: PE time distribution (if no FADC available)
-            try {
-                if (simData.HasPETimeDistribution()) {
-                    const auto& peTrace = simData.GetPETimeDistribution(
-                        sevt::StationConstants::eTotal
-                    );
-                    
-                    if (ProcessTimeDistribution(peTrace)) {
-                        tracesFound++;
-                        if (fTracesFound <= 5) {
-                            INFO("WARNING: Using PE time distribution - not a true FADC trace");
-                        }
-                        continue;
-                    }
-                }
-            } catch (const exception& e) {
-                // PE distribution access failed
-            }
         }
     }
     
@@ -503,48 +468,28 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
     // Extract trace data from TimeDistribution
     fTraceData.clear();
     
-    // First determine actual size
-    int actualSize = 0;
-    for (int i = 0; i < 2048; i++) {
-        try {
-            (void)timeDist[i];
-            actualSize = i + 1;
-        } catch (...) {
-            break;
-        }
-    }
+    // FADC traces should have 2048 bins
+    const int expectedSize = 2048;
     
-    if (actualSize == 0) {
-        return false;  // No data
-    }
-    
-    // Debug output
-    if (fTracesFound < 5) {
-        ostringstream msg;
-        msg << "TimeDistribution actual size: " << actualSize << ", First 20 values: ";
-        for (int i = 0; i < TMath::Min(20, actualSize); i++) {
-            msg << timeDist[i] << " ";
-        }
-        if (actualSize > 20) {
-            msg << "... Last 5 values: ";
-            for (int i = TMath::Max(0, actualSize-5); i < actualSize; i++) {
-                msg << timeDist[i] << " ";
-            }
-        }
-        INFO(msg.str());
-    }
-    
-    fTraceSize = 2048;  // Always use full size for histograms
+    // Read all bins from the TimeDistribution
+    fTraceSize = expectedSize;
     fPeakValue = 0;
     fPeakBin = 0;
     fTotalCharge = 0;
     
-    // Get actual trace data
-    for (int i = 0; i < actualSize; i++) {
-        double value = timeDist[i];
+    // Read the full trace - TimeDistribution should contain full FADC data
+    for (int i = 0; i < expectedSize; i++) {
+        double value = 0;
+        try {
+            value = timeDist[i];
+        } catch (...) {
+            // If we can't read this bin, it might be beyond the actual data
+            // For simulation baseline, use 50 ADC
+            value = 50.0;
+        }
         fTraceData.push_back(value);
         
-        // For simulation data, baseline appears to be around 50 ADC
+        // For simulation data, baseline is around 50 ADC
         double signal = value - 50.0;
         if (signal > 0) {
             fTotalCharge += signal;
@@ -556,18 +501,18 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
         }
     }
     
-    // Fill the rest with baseline to reach 2048 bins
-    for (int i = actualSize; i < 2048; i++) {
-        fTraceData.push_back(50.0);
+    // Only process traces with significant signal
+    if (fTotalCharge < 10.0) {
+        return false;  // Skip traces with almost no signal
     }
     
     // Calculate VEM charge
     fVEMCharge = fTotalCharge / 180.0;
     
-    // Create histogram - always 2048 bins
+    // Create histogram
     if (fTracesFound < fMaxHistograms) {
         TString histName = Form("eventHist_%d", 1000000000 + fTracesFound);
-        TString histTitle = Form("Histogram of Event %d, Station %d, PMT %d", 
+        TString histTitle = Form("Event %d, Station %d, PMT %d", 
                                 fEventId, fStationId, fPmtId);
         
         TH1D* traceHist = new TH1D(histName, histTitle, 2048, 0, 2048);
@@ -575,23 +520,16 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
         traceHist->GetYaxis()->SetTitle("ADC");
         traceHist->SetStats(kTRUE);
         
-        // Fill all 2048 bins
+        // Fill histogram with all 2048 bins
         for (int i = 0; i < 2048; i++) {
             traceHist->SetBinContent(i+1, fTraceData[i]);
         }
         
         fTraceHistograms->Add(traceHist);
-        
-        // Log actual vs displayed size
-        if (fTracesFound < 5) {
-            ostringstream msg;
-            msg << "Created histogram with 2048 bins (actual data: " << actualSize << " bins)";
-            INFO(msg.str());
-        }
     }
     
     // Fill summary histograms  
-    hTraceLength->Fill(actualSize);  // Store actual data length
+    hTraceLength->Fill(fTraceSize);
     hPeakValue->Fill(fPeakValue);
     hTotalCharge->Fill(fTotalCharge);
     hVEMCharge->Fill(fVEMCharge);
@@ -607,9 +545,13 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
     
     fTracesFound++;
     
-    if (fTracesFound % 10 == 0) {
+    if (fTracesFound <= 5) {
         ostringstream msg;
-        msg << "Found " << fTracesFound << " traces so far";
+        msg << "Found trace from TimeDistribution: Station " << fStationId 
+            << ", PMT " << fPmtId 
+            << ", Peak: " << fPeakValue << " ADC at bin " << fPeakBin
+            << ", Total charge: " << fTotalCharge 
+            << ", VEM: " << fVEMCharge;
         INFO(msg.str());
     }
     
