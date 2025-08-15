@@ -1,5 +1,5 @@
 // PMTTraceModule.cc
-// Fixed version for extracting FADC traces from CORSIKA simulations
+// Enhanced version with trigger type checking for MOPS, ToTD, etc.
 
 #include "PMTTraceModule.h"
 
@@ -41,6 +41,7 @@
 #include <sstream>
 #include <cmath>
 #include <csignal>
+#include <map>
 
 using namespace std;
 using namespace fwk;
@@ -124,6 +125,7 @@ VModule::ResultFlag PMTTraceModule::Init()
     INFO("Sampling rate: 40 MHz (25 ns per bin)");
     INFO("Total trace duration: 51.2 microseconds");
     INFO("Expected baseline: ~50 ADC (simulation) or ~350 ADC (real data)");
+    INFO("Trigger types monitored: MOPS, ToTD, Threshold, etc.");
     INFO("========================================");
     
     // Create output file
@@ -139,15 +141,43 @@ VModule::ResultFlag PMTTraceModule::Init()
     hNStations = new TH1D("hNStations", "Number of Triggered Stations;N;Events", 50, 0, 50);
     hNTracesPerEvent = new TH1D("hNTracesPerEvent", "Traces per Event;N;Events", 150, 0, 150);
     hTraceLength = new TH1D("hTraceLength", "Trace Length;Bins;Entries", 200, 0, 2100);
-    hPeakValue = new TH1D("hPeakValue", "Peak Value;ADC;Entries", 200, 0, 1000);  // Increased range
-    hTotalCharge = new TH1D("hTotalCharge", "Total Charge;ADC;Entries", 200, 0, 50000);  // Increased range
-    hVEMCharge = new TH1D("hVEMCharge", "VEM Charge;VEM;Entries", 200, 0, 300);  // Increased range
+    hPeakValue = new TH1D("hPeakValue", "Peak Value;ADC;Entries", 200, 0, 1000);
+    hTotalCharge = new TH1D("hTotalCharge", "Total Charge;ADC;Entries", 200, 0, 50000);
+    hVEMCharge = new TH1D("hVEMCharge", "VEM Charge;VEM;Entries", 200, 0, 300);
     hChargeVsDistance = new TH2D("hChargeVsDistance", "Charge vs Distance;r [m];VEM", 
-                                 50, 0, 3000, 100, 0.1, 1000);  // Increased VEM range
+                                 50, 0, 3000, 100, 0.1, 1000);
+    
+    // Add trigger type specific histograms
+    hTriggerTypes = new TH1D("hTriggerTypes", "Trigger Types;Algorithm;Count", 10, 0, 10);
+    hTriggerTypes->GetXaxis()->SetBinLabel(1, "MOPS");
+    hTriggerTypes->GetXaxis()->SetBinLabel(2, "ToTD");
+    hTriggerTypes->GetXaxis()->SetBinLabel(3, "Threshold");
+    hTriggerTypes->GetXaxis()->SetBinLabel(4, "ToT");
+    hTriggerTypes->GetXaxis()->SetBinLabel(5, "Other");
+    hTriggerTypes->GetXaxis()->SetBinLabel(6, "T1");
+    hTriggerTypes->GetXaxis()->SetBinLabel(7, "T2");
+    hTriggerTypes->GetXaxis()->SetBinLabel(8, "Unknown");
+    
+    // VEM charge per trigger type
+    hVEMChargeMOPS = new TH1D("hVEMChargeMOPS", "VEM Charge (MOPS trigger);VEM;Entries", 200, 0, 300);
+    hVEMChargeToTD = new TH1D("hVEMChargeToTD", "VEM Charge (ToTD trigger);VEM;Entries", 200, 0, 300);
+    hVEMChargeThreshold = new TH1D("hVEMChargeThreshold", "VEM Charge (Threshold trigger);VEM;Entries", 200, 0, 300);
+    hVEMChargeOther = new TH1D("hVEMChargeOther", "VEM Charge (Other trigger);VEM;Entries", 200, 0, 300);
+    
+    // Charge vs distance per trigger type
+    hChargeVsDistanceMOPS = new TH2D("hChargeVsDistanceMOPS", 
+                                     "Charge vs Distance (MOPS);r [m];VEM", 
+                                     50, 0, 3000, 100, 0.1, 1000);
+    hChargeVsDistanceToTD = new TH2D("hChargeVsDistanceToTD", 
+                                     "Charge vs Distance (ToTD);r [m];VEM", 
+                                     50, 0, 3000, 100, 0.1, 1000);
     
     // Initialize trace histogram array
     fTraceHistograms = new TObjArray();
     fTraceHistograms->SetOwner(kTRUE);
+    
+    // Initialize trigger counters
+    fTriggerCounts.clear();
     
     // Create trace tree
     fTraceTree = new TTree("TraceTree", "PMT Traces from CORSIKA");
@@ -166,6 +196,10 @@ VModule::ResultFlag PMTTraceModule::Init()
     fTraceTree->Branch("peakValue", &fPeakValue, "peakValue/D");
     fTraceTree->Branch("totalCharge", &fTotalCharge, "totalCharge/D");
     fTraceTree->Branch("vemCharge", &fVEMCharge, "vemCharge/D");
+    fTraceTree->Branch("triggerType", &fTriggerType);
+    fTraceTree->Branch("triggerAlgorithm", &fTriggerAlgorithm);
+    fTraceTree->Branch("isT1", &fIsT1, "isT1/O");
+    fTraceTree->Branch("isT2", &fIsT2, "isT2/O");
     fTraceTree->Branch("traceData", &fTraceData);
     
     ostringstream msg;
@@ -232,7 +266,7 @@ VModule::ResultFlag PMTTraceModule::Run(Event& event)
     return eSuccess;
 }
 
-// ProcessStations method
+// ProcessStations method - Enhanced with trigger type checking
 void PMTTraceModule::ProcessStations(const Event& event)
 {
     const SEvent& sevent = event.GetSEvent();
@@ -250,29 +284,70 @@ void PMTTraceModule::ProcessStations(const Event& event)
         fStationId = station.GetId();
         
         // For simulations, we need stations with simulation data
-        // This means they were hit by particles from the shower
         if (!station.HasSimData()) {
             continue;
         }
         
-        // Check if station has trigger data (optional for simulations)
+        // Initialize trigger information for this station
+        fTriggerType = "Unknown";
+        fTriggerAlgorithm = "Unknown";
+        fIsT1 = false;
+        fIsT2 = false;
+        
+        // Check trigger information
         bool hasValidTrigger = false;
         if (station.HasTriggerData()) {
             const sevt::StationTriggerData& triggerData = station.GetTriggerData();
             
             // Check if it's a valid trigger (not silent, no errors)
             if (!triggerData.IsSilent() && triggerData.GetErrorCode() == 0) {
-                // Check if it's T1 or T2
-                hasValidTrigger = triggerData.IsT1() || triggerData.IsT2(); //used T1 checks previously too
-                //hasValidTrigger = triggerData.IsT2();
+                // Get trigger algorithm name
+                fTriggerAlgorithm = triggerData.GetAlgorithmName();
                 
-                if (hasValidTrigger && fTracesFound <= 5) {
+                // Check trigger levels
+                fIsT1 = triggerData.IsT1();
+                fIsT2 = triggerData.IsT2();
+                
+                hasValidTrigger = fIsT2;  // We mainly care about T2 triggers
+                
+                // Determine trigger type from algorithm name
+                if (fTriggerAlgorithm.find("MOPS") != string::npos) {
+                    fTriggerType = "MOPS";
+                } else if (fTriggerAlgorithm.find("ToTD") != string::npos) {
+                    fTriggerType = "ToTD";
+                } else if (fTriggerAlgorithm.find("Threshold") != string::npos) {
+                    fTriggerType = "Threshold";
+                } else if (fTriggerAlgorithm.find("ToT") != string::npos) {
+                    fTriggerType = "ToT";
+                } else if (fIsT1 || fIsT2) {
+                    fTriggerType = (fIsT2 ? "T2" : "T1");
+                } else {
+                    fTriggerType = "Other";
+                }
+                
+                // Log trigger information for first few stations
+                if (hasValidTrigger && fTracesFound <= 10) {
                     ostringstream msg;
-                    msg << "Station " << fStationId << " has trigger: " 
-                        << (triggerData.IsT1() ? "T1" : "T2") 
-                        << ", Algorithm: " << triggerData.GetAlgorithmName();
+                    msg << "Station " << fStationId 
+                        << " - Trigger Type: " << fTriggerType
+                        << ", Algorithm: " << fTriggerAlgorithm
+                        << ", T1: " << (fIsT1 ? "yes" : "no")
+                        << ", T2: " << (fIsT2 ? "yes" : "no");
                     INFO(msg.str());
                 }
+                
+                // Update trigger counters
+                fTriggerCounts[fTriggerType]++;
+                
+                // Fill trigger type histogram
+                if (fTriggerType == "MOPS") hTriggerTypes->Fill(0);
+                else if (fTriggerType == "ToTD") hTriggerTypes->Fill(1);
+                else if (fTriggerType == "Threshold") hTriggerTypes->Fill(2);
+                else if (fTriggerType == "ToT") hTriggerTypes->Fill(3);
+                else if (fTriggerType == "Other") hTriggerTypes->Fill(4);
+                else if (fTriggerType == "T1") hTriggerTypes->Fill(5);
+                else if (fTriggerType == "T2") hTriggerTypes->Fill(6);
+                else hTriggerTypes->Fill(7);  // Unknown
             }
         }
         
@@ -300,11 +375,12 @@ void PMTTraceModule::ProcessStations(const Event& event)
         int tracesThisStation = ProcessPMTs(station);
         nTracesThisEvent += tracesThisStation;
         
-        if (fTracesFound <= 5 && tracesThisStation > 0) {
+        if (fTracesFound <= 10 && tracesThisStation > 0) {
             ostringstream msg;
             msg << "Station " << fStationId << " processed"
                 << ", Distance: " << fDistance << " m"
-                << ", Traces found: " << tracesThisStation;
+                << ", Traces found: " << tracesThisStation
+                << ", Trigger: " << fTriggerType << "/" << fTriggerAlgorithm;
             INFO(msg.str());
         }
     }
@@ -322,7 +398,7 @@ void PMTTraceModule::ProcessStations(const Event& event)
     }
 }
 
-// ProcessPMTs method - Fixed version
+// ProcessPMTs method - Enhanced to use trigger type information
 int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
 {
     int tracesFound = 0;
@@ -339,10 +415,9 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
         const sevt::PMT& pmt = station.GetPMT(pmtId);
         fPmtId = pmtId;
         
-        // Method 1: Try to get FADC trace directly from PMT (like in EAStripperDFN.cc)
+        // Method 1: Try to get FADC trace directly from PMT
         if (pmt.HasFADCTrace()) {
             try {
-                // Use auto to avoid type issues
                 const auto& trace = pmt.GetFADCTrace(sdet::PMTConstants::eHighGain);
                 
                 // Process the trace
@@ -363,12 +438,10 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                     try {
                         value = trace[i];
                     } catch (...) {
-                        // If we can't read this bin, use baseline
-                        value = 50.0;
+                        value = 50.0;  // baseline
                     }
                     fTraceData.push_back(value);
                     
-                    // For simulation, baseline is typically around 50 ADC
                     double signal = value - 50.0;
                     if (signal > 0) {
                         fTotalCharge += signal;
@@ -385,14 +458,14 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                 
                 // Only save traces with significant signals
                 if (fTotalCharge < 10.0) {
-                    continue;  // Skip traces with almost no signal
+                    continue;
                 }
                 
-                // Create histogram
+                // Create histogram with trigger type in title
                 if (fTracesFound < fMaxHistograms) {
                     TString histName = Form("eventHist_%d", 1000000000 + fTracesFound);
-                    TString histTitle = Form("Event %d, Station %d, PMT %d", 
-                                            fEventId, fStationId, fPmtId);
+                    TString histTitle = Form("Event %d, Station %d, PMT %d [%s trigger]", 
+                                            fEventId, fStationId, fPmtId, fTriggerType.c_str());
                     
                     TH1D* traceHist = new TH1D(histName, histTitle, 2048, 0, 2048);
                     traceHist->GetXaxis()->SetTitle("Time bin");
@@ -413,6 +486,23 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                 hTotalCharge->Fill(fTotalCharge);
                 hVEMCharge->Fill(fVEMCharge);
                 
+                // Fill trigger-specific histograms
+                if (fTriggerType == "MOPS") {
+                    hVEMChargeMOPS->Fill(fVEMCharge);
+                    if (fDistance > 0 && fVEMCharge > 0.1) {
+                        hChargeVsDistanceMOPS->Fill(fDistance, fVEMCharge);
+                    }
+                } else if (fTriggerType == "ToTD") {
+                    hVEMChargeToTD->Fill(fVEMCharge);
+                    if (fDistance > 0 && fVEMCharge > 0.1) {
+                        hChargeVsDistanceToTD->Fill(fDistance, fVEMCharge);
+                    }
+                } else if (fTriggerType == "Threshold") {
+                    hVEMChargeThreshold->Fill(fVEMCharge);
+                } else {
+                    hVEMChargeOther->Fill(fVEMCharge);
+                }
+                
                 if (fDistance > 0 && fVEMCharge > 0.1) {
                     hChargeVsDistance->Fill(fDistance, fVEMCharge);
                 }
@@ -425,10 +515,11 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                 fTracesFound++;
                 tracesFound++;
                 
-                if (fTracesFound <= 5) {
+                if (fTracesFound <= 10) {
                     ostringstream msg;
                     msg << "Found FADC trace: Station " << fStationId 
                         << ", PMT " << fPmtId 
+                        << ", Trigger: " << fTriggerType
                         << ", Peak: " << fPeakValue << " ADC at bin " << fPeakBin
                         << ", Total charge: " << fTotalCharge 
                         << ", VEM: " << fVEMCharge;
@@ -475,7 +566,7 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
     return tracesFound;
 }
 
-// ProcessTimeDistribution method
+// ProcessTimeDistribution method - Enhanced to use trigger type
 bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& timeDist)
 {
     // Extract trace data from TimeDistribution
@@ -490,19 +581,16 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
     fPeakBin = 0;
     fTotalCharge = 0;
     
-    // Read the full trace - TimeDistribution should contain full FADC data
+    // Read the full trace
     for (int i = 0; i < expectedSize; i++) {
         double value = 0;
         try {
             value = timeDist[i];
         } catch (...) {
-            // If we can't read this bin, it might be beyond the actual data
-            // For simulation baseline, use 50 ADC
-            value = 50.0;
+            value = 50.0;  // baseline
         }
         fTraceData.push_back(value);
         
-        // For simulation data, baseline is around 50 ADC
         double signal = value - 50.0;
         if (signal > 0) {
             fTotalCharge += signal;
@@ -516,24 +604,24 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
     
     // Only process traces with significant signal
     if (fTotalCharge < 10.0) {
-        return false;  // Skip traces with almost no signal
+        return false;
     }
     
     // Calculate VEM charge
     fVEMCharge = fTotalCharge / 180.0;
     
-    // Create histogram
+    // Create histogram with trigger type
     if (fTracesFound < fMaxHistograms) {
         TString histName = Form("eventHist_%d", 1000000000 + fTracesFound);
-        TString histTitle = Form("Event %d, Station %d, PMT %d", 
-                                fEventId, fStationId, fPmtId);
+        TString histTitle = Form("Event %d, Station %d, PMT %d [%s trigger]", 
+                                fEventId, fStationId, fPmtId, fTriggerType.c_str());
         
         TH1D* traceHist = new TH1D(histName, histTitle, 2048, 0, 2048);
         traceHist->GetXaxis()->SetTitle("Time bin");
         traceHist->GetYaxis()->SetTitle("ADC");
         traceHist->SetStats(kTRUE);
         
-        // Fill histogram with all 2048 bins
+        // Fill histogram
         for (int i = 0; i < 2048; i++) {
             traceHist->SetBinContent(i+1, fTraceData[i]);
         }
@@ -547,6 +635,23 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
     hTotalCharge->Fill(fTotalCharge);
     hVEMCharge->Fill(fVEMCharge);
     
+    // Fill trigger-specific histograms
+    if (fTriggerType == "MOPS") {
+        hVEMChargeMOPS->Fill(fVEMCharge);
+        if (fDistance > 0 && fVEMCharge > 0.1) {
+            hChargeVsDistanceMOPS->Fill(fDistance, fVEMCharge);
+        }
+    } else if (fTriggerType == "ToTD") {
+        hVEMChargeToTD->Fill(fVEMCharge);
+        if (fDistance > 0 && fVEMCharge > 0.1) {
+            hChargeVsDistanceToTD->Fill(fDistance, fVEMCharge);
+        }
+    } else if (fTriggerType == "Threshold") {
+        hVEMChargeThreshold->Fill(fVEMCharge);
+    } else {
+        hVEMChargeOther->Fill(fVEMCharge);
+    }
+    
     if (fDistance > 0 && fVEMCharge > 0.1) {
         hChargeVsDistance->Fill(fDistance, fVEMCharge);
     }
@@ -558,10 +663,11 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
     
     fTracesFound++;
     
-    if (fTracesFound <= 5) {
+    if (fTracesFound <= 10) {
         ostringstream msg;
         msg << "Found trace from TimeDistribution: Station " << fStationId 
             << ", PMT " << fPmtId 
+            << ", Trigger: " << fTriggerType
             << ", Peak: " << fPeakValue << " ADC at bin " << fPeakBin
             << ", Total charge: " << fTotalCharge 
             << ", VEM: " << fVEMCharge;
@@ -571,12 +677,22 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
     return true;
 }
 
-// SaveAndDisplayTraces method
+// SaveAndDisplayTraces method - Enhanced with trigger summary
 void PMTTraceModule::SaveAndDisplayTraces()
 {
     ostringstream msg;
     msg << "Interrupt handler called. Found " << fTracesFound << " traces so far.";
     INFO(msg.str());
+    
+    // Print trigger type summary
+    INFO("=== Trigger Type Summary ===");
+    for (map<string, int>::const_iterator it = fTriggerCounts.begin(); 
+         it != fTriggerCounts.end(); ++it) {
+        ostringstream triggerMsg;
+        triggerMsg << "  " << it->first << ": " << it->second << " stations";
+        INFO(triggerMsg.str());
+    }
+    INFO("=============================");
     
     // First save all data to file
     if (fOutputFile) {
@@ -614,7 +730,7 @@ void PMTTraceModule::SaveAndDisplayTraces()
         TCanvas* c1 = new TCanvas("c1", "Sample FADC Traces", 1200, 800);
         c1->Divide(2, 2);
         
-        // Select interesting traces to display
+        // Select interesting traces to display (try to get different trigger types)
         int nHists = fTraceHistograms->GetEntries();
         int indices[4];
         
@@ -661,11 +777,42 @@ void PMTTraceModule::SaveAndDisplayTraces()
         c1->SaveAs("sample_fadc_traces.pdf");
         INFO("Sample traces saved to sample_fadc_traces.png and .pdf");
         
+        // Create trigger summary canvas
+        TCanvas* c2 = new TCanvas("c2", "Trigger Analysis", 1200, 800);
+        c2->Divide(2, 2);
+        
+        c2->cd(1);
+        gPad->SetLogy();
+        hTriggerTypes->Draw();
+        
+        c2->cd(2);
+        gPad->SetLogy();
+        hVEMChargeMOPS->SetLineColor(kRed);
+        hVEMChargeMOPS->Draw();
+        hVEMChargeToTD->SetLineColor(kBlue);
+        hVEMChargeToTD->Draw("same");
+        hVEMChargeThreshold->SetLineColor(kGreen);
+        hVEMChargeThreshold->Draw("same");
+        
+        c2->cd(3);
+        gPad->SetLogz();
+        hChargeVsDistanceMOPS->Draw("colz");
+        
+        c2->cd(4);
+        gPad->SetLogz();
+        hChargeVsDistanceToTD->Draw("colz");
+        
+        c2->Update();
+        c2->SaveAs("trigger_analysis.png");
+        c2->SaveAs("trigger_analysis.pdf");
+        INFO("Trigger analysis saved to trigger_analysis.png and .pdf");
+        
         // Keep displayed for a moment
         gSystem->ProcessEvents();
         gSystem->Sleep(3000);
         
         delete c1;
+        delete c2;
     }
     
     // Close the output file
@@ -679,7 +826,7 @@ void PMTTraceModule::SaveAndDisplayTraces()
     }
 }
 
-// Finish method
+// Finish method - Enhanced with trigger summary
 VModule::ResultFlag PMTTraceModule::Finish()
 {
     INFO("PMTTraceModule::Finish() - Normal completion");
@@ -691,6 +838,16 @@ VModule::ResultFlag PMTTraceModule::Finish()
         << "  Traces found: " << fTracesFound << "\n"
         << "  Histograms created: " << TMath::Min(fTracesFound, fMaxHistograms);
     INFO(msg.str());
+    
+    // Print final trigger type summary
+    INFO("=== Final Trigger Type Summary ===");
+    for (map<string, int>::const_iterator it = fTriggerCounts.begin(); 
+         it != fTriggerCounts.end(); ++it) {
+        ostringstream triggerMsg;
+        triggerMsg << "  " << it->first << ": " << it->second << " stations";
+        INFO(triggerMsg.str());
+    }
+    INFO("===================================");
     
     if (fOutputFile) {
         fOutputFile->cd();
