@@ -48,8 +48,8 @@
       <!-- Generate baseline noise -->
       <module> SdBaselineSimulatorOG </module>
       
-      <!-- ML-based photon trigger (NEW) -->
-      <module> PhotonTriggerML </module>
+      <!-- ML-based photon trigger -->
+      <module> PhotonTriggerML </module> 
       
       <!-- Tank trigger simulation -->
       <module> TankTriggerSimulatorOG </module>
