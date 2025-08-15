@@ -42,6 +42,7 @@
 #include <cmath>
 #include <csignal>
 #include <map>
+#include <cctype>  // for toupper
 
 using namespace std;
 using namespace fwk;
@@ -148,7 +149,7 @@ VModule::ResultFlag PMTTraceModule::Init()
                                  50, 0, 3000, 100, 0.1, 1000);
     
     // Add trigger type specific histograms
-    hTriggerTypes = new TH1D("hTriggerTypes", "Trigger Types;Algorithm;Count", 10, 0, 10);
+    hTriggerTypes = new TH1D("hTriggerTypes", "Trigger Types;Algorithm;Count", 12, 0, 12);
     hTriggerTypes->GetXaxis()->SetBinLabel(1, "MOPS");
     hTriggerTypes->GetXaxis()->SetBinLabel(2, "ToTD");
     hTriggerTypes->GetXaxis()->SetBinLabel(3, "Threshold");
@@ -157,6 +158,10 @@ VModule::ResultFlag PMTTraceModule::Init()
     hTriggerTypes->GetXaxis()->SetBinLabel(6, "T1");
     hTriggerTypes->GetXaxis()->SetBinLabel(7, "T2");
     hTriggerTypes->GetXaxis()->SetBinLabel(8, "Unknown");
+    hTriggerTypes->GetXaxis()->SetBinLabel(9, "Inferred-MOPS");
+    hTriggerTypes->GetXaxis()->SetBinLabel(10, "Inferred-ToTD");
+    hTriggerTypes->GetXaxis()->SetBinLabel(11, "Inferred-Threshold");
+    hTriggerTypes->GetXaxis()->SetBinLabel(12, "Inferred-Low");
     
     // VEM charge per trigger type
     hVEMChargeMOPS = new TH1D("hVEMChargeMOPS", "VEM Charge (MOPS trigger);VEM;Entries", 200, 0, 300);
@@ -299,6 +304,19 @@ void PMTTraceModule::ProcessStations(const Event& event)
         if (station.HasTriggerData()) {
             const sevt::StationTriggerData& triggerData = station.GetTriggerData();
             
+            // Debug: Log raw trigger data for first few stations
+            if (fEventCount <= 5 && nStations <= 3) {
+                ostringstream debugMsg;
+                debugMsg << "Station " << fStationId << " trigger debug:"
+                        << " HasTriggerData=yes"
+                        << ", IsSilent=" << (triggerData.IsSilent() ? "yes" : "no")
+                        << ", ErrorCode=" << triggerData.GetErrorCode()
+                        << ", IsT1=" << (triggerData.IsT1() ? "yes" : "no")
+                        << ", IsT2=" << (triggerData.IsT2() ? "yes" : "no")
+                        << ", Algorithm='" << triggerData.GetAlgorithmName() << "'";
+                INFO(debugMsg.str());
+            }
+            
             // Check if it's a valid trigger (not silent, no errors)
             if (!triggerData.IsSilent() && triggerData.GetErrorCode() == 0) {
                 // Get trigger algorithm name
@@ -311,18 +329,29 @@ void PMTTraceModule::ProcessStations(const Event& event)
                 hasValidTrigger = fIsT2;  // We mainly care about T2 triggers
                 
                 // Determine trigger type from algorithm name
-                if (fTriggerAlgorithm.find("MOPS") != string::npos) {
-                    fTriggerType = "MOPS";
-                } else if (fTriggerAlgorithm.find("ToTD") != string::npos) {
-                    fTriggerType = "ToTD";
-                } else if (fTriggerAlgorithm.find("Threshold") != string::npos) {
-                    fTriggerType = "Threshold";
-                } else if (fTriggerAlgorithm.find("ToT") != string::npos) {
-                    fTriggerType = "ToT";
+                if (!fTriggerAlgorithm.empty()) {
+                    // Convert to uppercase for case-insensitive comparison
+                    string algorithmUpper = fTriggerAlgorithm;
+                    for (size_t i = 0; i < algorithmUpper.length(); i++) {
+                        algorithmUpper[i] = toupper(algorithmUpper[i]);
+                    }
+                    
+                    if (algorithmUpper.find("MOPS") != string::npos) {
+                        fTriggerType = "MOPS";
+                    } else if (algorithmUpper.find("TOTD") != string::npos) {
+                        fTriggerType = "ToTD";
+                    } else if (algorithmUpper.find("THRESHOLD") != string::npos) {
+                        fTriggerType = "Threshold";
+                    } else if (algorithmUpper.find("TOT") != string::npos) {
+                        fTriggerType = "ToT";
+                    } else {
+                        fTriggerType = "Other";
+                    }
                 } else if (fIsT1 || fIsT2) {
+                    // No algorithm name, but we have T1/T2 info
                     fTriggerType = (fIsT2 ? "T2" : "T1");
                 } else {
-                    fTriggerType = "Other";
+                    fTriggerType = "NoAlgorithm";
                 }
                 
                 // Log trigger information for first few stations
@@ -330,7 +359,7 @@ void PMTTraceModule::ProcessStations(const Event& event)
                     ostringstream msg;
                     msg << "Station " << fStationId 
                         << " - Trigger Type: " << fTriggerType
-                        << ", Algorithm: " << fTriggerAlgorithm
+                        << ", Algorithm: '" << fTriggerAlgorithm << "'"
                         << ", T1: " << (fIsT1 ? "yes" : "no")
                         << ", T2: " << (fIsT2 ? "yes" : "no");
                     INFO(msg.str());
@@ -347,14 +376,45 @@ void PMTTraceModule::ProcessStations(const Event& event)
                 else if (fTriggerType == "Other") hTriggerTypes->Fill(4);
                 else if (fTriggerType == "T1") hTriggerTypes->Fill(5);
                 else if (fTriggerType == "T2") hTriggerTypes->Fill(6);
-                else hTriggerTypes->Fill(7);  // Unknown
+                else if (fTriggerType == "Unknown") hTriggerTypes->Fill(7);
+                else if (fTriggerType == "Inferred-MOPS") hTriggerTypes->Fill(8);
+                else if (fTriggerType == "Inferred-ToTD") hTriggerTypes->Fill(9);
+                else if (fTriggerType == "Inferred-Threshold") hTriggerTypes->Fill(10);
+                else if (fTriggerType == "Inferred-Low") hTriggerTypes->Fill(11);
+            } else {
+                // Station has trigger data but it's silent or has errors
+                if (fEventCount <= 5 && nStations <= 3) {
+                    ostringstream msg;
+                    msg << "Station " << fStationId 
+                        << " has trigger data but silent=" << triggerData.IsSilent()
+                        << " or error=" << triggerData.GetErrorCode();
+                    INFO(msg.str());
+                }
             }
+        } else {
+            // No trigger data at all - common in simulations
+            // Try to infer trigger type from signal characteristics
+            if (fEventCount <= 5 && nStations <= 3) {
+                ostringstream msg;
+                msg << "Station " << fStationId << " has NO trigger data (common in simulations)";
+                INFO(msg.str());
+            }
+            
+            // For simulations without trigger data, we can classify based on signal
+            // This is a placeholder - you might want to implement actual trigger simulation
+            fTriggerType = "SimNoTrigger";
         }
         
         // For simulations without trigger data, we process all stations with sim data
         // For simulations with trigger data, we only process triggered stations
         if (station.HasTriggerData() && !hasValidTrigger) {
             continue;
+        }
+        
+        // If we don't have trigger data, try to infer from signal characteristics later
+        if (fTriggerType == "Unknown" || fTriggerType == "SimNoTrigger") {
+            // We'll determine this based on signal characteristics in ProcessPMTs
+            fTriggerType = "Inferred";
         }
         
         nStations++;
@@ -461,6 +521,50 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                     continue;
                 }
                 
+                // If trigger type is still unknown/inferred, try to determine from signal
+                if (fTriggerType == "Inferred" || fTriggerType == "Unknown" || fTriggerType == "SimNoTrigger") {
+                    // Infer trigger type based on signal characteristics
+                    // These are approximations based on typical trigger behavior
+                    
+                    // Count bins above threshold
+                    int binsAbove3VEM = 0;
+                    int binsAbove1_75VEM = 0;
+                    double threshold3VEM = 50.0 + 3.0 * 180.0;  // baseline + 3 VEM
+                    double threshold1_75VEM = 50.0 + 1.75 * 180.0;  // baseline + 1.75 VEM
+                    
+                    for (int i = 0; i < fTraceSize; i++) {
+                        if (fTraceData[i] > threshold3VEM) binsAbove3VEM++;
+                        if (fTraceData[i] > threshold1_75VEM) binsAbove1_75VEM++;
+                    }
+                    
+                    // MOPS-like: multiplicity of peaks - look for multiple peaks
+                    // ToTD-like: time over threshold - sustained signal
+                    // Threshold-like: simple amplitude threshold
+                    
+                    if (fPeakValue > 50.0 + 5.0 * 180.0) {
+                        // Very high peak - likely Threshold trigger
+                        fTriggerType = "Inferred-Threshold";
+                    } else if (binsAbove1_75VEM > 13) {  // 13 bins ~ 325 ns
+                        // Sustained signal above 1.75 VEM - ToTD-like
+                        fTriggerType = "Inferred-ToTD";
+                    } else if (fVEMCharge > 3.0 && fPeakValue > 50.0 + 2.0 * 180.0) {
+                        // Moderate signal with good integrated charge - MOPS-like
+                        fTriggerType = "Inferred-MOPS";
+                    } else {
+                        fTriggerType = "Inferred-Low";
+                    }
+                    
+                    if (fTracesFound <= 10) {
+                        ostringstream msg;
+                        msg << "Inferred trigger type for Station " << fStationId 
+                            << ": " << fTriggerType
+                            << " (Peak=" << fPeakValue 
+                            << ", VEM=" << fVEMCharge
+                            << ", BinsAbove1.75VEM=" << binsAbove1_75VEM << ")";
+                        INFO(msg.str());
+                    }
+                }
+                
                 // Create histogram with trigger type in title
                 if (fTracesFound < fMaxHistograms) {
                     TString histName = Form("eventHist_%d", 1000000000 + fTracesFound);
@@ -487,17 +591,17 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                 hVEMCharge->Fill(fVEMCharge);
                 
                 // Fill trigger-specific histograms
-                if (fTriggerType == "MOPS") {
+                if (fTriggerType == "MOPS" || fTriggerType == "Inferred-MOPS") {
                     hVEMChargeMOPS->Fill(fVEMCharge);
                     if (fDistance > 0 && fVEMCharge > 0.1) {
                         hChargeVsDistanceMOPS->Fill(fDistance, fVEMCharge);
                     }
-                } else if (fTriggerType == "ToTD") {
+                } else if (fTriggerType == "ToTD" || fTriggerType == "Inferred-ToTD") {
                     hVEMChargeToTD->Fill(fVEMCharge);
                     if (fDistance > 0 && fVEMCharge > 0.1) {
                         hChargeVsDistanceToTD->Fill(fDistance, fVEMCharge);
                     }
-                } else if (fTriggerType == "Threshold") {
+                } else if (fTriggerType == "Threshold" || fTriggerType == "Inferred-Threshold") {
                     hVEMChargeThreshold->Fill(fVEMCharge);
                 } else {
                     hVEMChargeOther->Fill(fVEMCharge);
@@ -610,6 +714,32 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
     // Calculate VEM charge
     fVEMCharge = fTotalCharge / 180.0;
     
+    // If trigger type is still unknown/inferred, try to determine from signal
+    if (fTriggerType == "Inferred" || fTriggerType == "Unknown" || fTriggerType == "SimNoTrigger") {
+        // Infer trigger type based on signal characteristics
+        
+        // Count bins above threshold
+        int binsAbove3VEM = 0;
+        int binsAbove1_75VEM = 0;
+        double threshold3VEM = 50.0 + 3.0 * 180.0;
+        double threshold1_75VEM = 50.0 + 1.75 * 180.0;
+        
+        for (int i = 0; i < fTraceSize; i++) {
+            if (fTraceData[i] > threshold3VEM) binsAbove3VEM++;
+            if (fTraceData[i] > threshold1_75VEM) binsAbove1_75VEM++;
+        }
+        
+        if (fPeakValue > 50.0 + 5.0 * 180.0) {
+            fTriggerType = "Inferred-Threshold";
+        } else if (binsAbove1_75VEM > 13) {
+            fTriggerType = "Inferred-ToTD";
+        } else if (fVEMCharge > 3.0 && fPeakValue > 50.0 + 2.0 * 180.0) {
+            fTriggerType = "Inferred-MOPS";
+        } else {
+            fTriggerType = "Inferred-Low";
+        }
+    }
+    
     // Create histogram with trigger type
     if (fTracesFound < fMaxHistograms) {
         TString histName = Form("eventHist_%d", 1000000000 + fTracesFound);
@@ -636,17 +766,17 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
     hVEMCharge->Fill(fVEMCharge);
     
     // Fill trigger-specific histograms
-    if (fTriggerType == "MOPS") {
+    if (fTriggerType == "MOPS" || fTriggerType == "Inferred-MOPS") {
         hVEMChargeMOPS->Fill(fVEMCharge);
         if (fDistance > 0 && fVEMCharge > 0.1) {
             hChargeVsDistanceMOPS->Fill(fDistance, fVEMCharge);
         }
-    } else if (fTriggerType == "ToTD") {
+    } else if (fTriggerType == "ToTD" || fTriggerType == "Inferred-ToTD") {
         hVEMChargeToTD->Fill(fVEMCharge);
         if (fDistance > 0 && fVEMCharge > 0.1) {
             hChargeVsDistanceToTD->Fill(fDistance, fVEMCharge);
         }
-    } else if (fTriggerType == "Threshold") {
+    } else if (fTriggerType == "Threshold" || fTriggerType == "Inferred-Threshold") {
         hVEMChargeThreshold->Fill(fVEMCharge);
     } else {
         hVEMChargeOther->Fill(fVEMCharge);
