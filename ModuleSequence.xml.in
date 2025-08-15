@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="iso-8859-1"?>
 
-<!-- Module sequence with ML-based photon trigger for 10^18-10^19 eV -->
-<!-- Implements PhD proposal for 50% efficiency improvement -->
+<!-- Module sequence for generating PMT traces with ML photon trigger -->
 
 <!DOCTYPE sequenceFile [
   <!ENTITY % sd SYSTEM "@CONFIGDIR@/standardSdSequences.dtd">
@@ -16,23 +15,15 @@
 
   <moduleControl>
 
-    <!-- Process up to 1000 showers for analysis -->
+    <!-- Process up to 1000 showers -->
     <loop numTimes='1000' pushEventToStack="yes">
 
-      <!-- ============================================= -->
-      <!-- STAGE 1: Event Input and Generation          -->
-      <!-- ============================================= -->
-      
-      <!-- Read CORSIKA shower files (10^18 - 10^19 eV range) -->
+      <!-- Read CORSIKA shower files -->
       <module> EventFileReaderOG </module>
 
       <!-- Generate random core position on array -->
       <module> EventGeneratorOG </module>
 
-      <!-- ============================================= -->
-      <!-- STAGE 2: Detector Simulation                 -->
-      <!-- ============================================= -->
-      
       <!-- Simulate muon background (accidental triggers) -->
       <module> SdAccidentalInjectorKG </module>
       
@@ -48,10 +39,6 @@
       <!-- Fill calibration data -->
       <module> SdSimulationCalibrationFillerOG </module>
       
-      <!-- ============================================= -->
-      <!-- STAGE 3: PMT and Electronics Simulation      -->
-      <!-- ============================================= -->
-      
       <!-- Simulate PMT response -->
       <module> SdPMTSimulatorOG </module>
       
@@ -61,74 +48,23 @@
       <!-- Generate baseline noise -->
       <module> SdBaselineSimulatorOG </module>
       
-      <!-- ============================================= -->
-      <!-- STAGE 4: Machine Learning Photon Trigger     -->
-      <!-- ============================================= -->
-      
-      <!-- Apply ML-based photon discrimination at T1 level -->
-      <!-- This module:                                      -->
-      <!--   - Extracts 24 features from FADC traces        -->
-      <!--   - Runs lightweight neural network              -->
-      <!--   - Makes T1 trigger decision                    -->
-      <!--   - Targets 50% efficiency improvement           -->
+      <!-- ML-based photon trigger (NEW) -->
       <module> PhotonTriggerML </module>
       
-      <!-- ============================================= -->
-      <!-- STAGE 5: Standard Trigger Simulation         -->
-      <!-- ============================================= -->
-      
-      <!-- Tank trigger simulation (can run in parallel with ML) -->
+      <!-- Tank trigger simulation -->
       <module> TankTriggerSimulatorOG </module>
       
-      <!-- ============================================= -->
-      <!-- STAGE 6: Analysis and Data Extraction        -->
-      <!-- ============================================= -->
-      
-      <!-- Extract PMT traces for detailed analysis -->
-      <!-- Now includes trigger type information from ML -->
+      <!-- Our trace extraction module -->
       <module> PMTTraceModule </module>
-      
-      <!-- ============================================= -->
-      <!-- STAGE 7: Event Export                        -->
-      <!-- ============================================= -->
       
       <!-- Clear particle lists for next event -->
       <module> ClearParticleLists </module>
       
-      <!-- Export to ROOT file with ML trigger flags -->
+      <!-- Export if needed -->
       <module> EventFileExporterOG </module>
 
     </loop>
 
-    <!-- ============================================= -->
-    <!-- Post-Processing Analysis (Optional)          -->
-    <!-- ============================================= -->
-    
-    <!-- Calculate final performance metrics -->
-    <module> PhotonTriggerPerformanceAnalyzer </module>
-
   </moduleControl>
-
-  <!-- ============================================= -->
-  <!-- Module Configuration References               -->
-  <!-- ============================================= -->
-  <configurationReferences>
-    <reference module="PhotonTriggerML" file="PhotonTriggerML.xml"/>
-    <reference module="PMTTraceModule" file="PMTTraceModule.xml"/>
-    <reference module="EventFileReaderOG" file="EventFileReader.xml"/>
-    <reference module="EventGeneratorOG" file="EventGenerator.xml"/>
-    <reference module="EventFileExporterOG" file="EventFileExporter.xml"/>
-  </configurationReferences>
-
-  <!-- ============================================= -->
-  <!-- Performance Monitoring                       -->
-  <!-- ============================================= -->
-  <performanceMonitoring>
-    <!-- Track ML trigger performance -->
-    <metric name="PhotonEfficiency" target="0.5" improvement="relative"/>
-    <metric name="BackgroundReduction" target="0.3" improvement="absolute"/>
-    <metric name="TriggerLatency" target="1.0" unit="microseconds"/>
-    <metric name="ProcessingRate" target="100" unit="Hz"/>
-  </performanceMonitoring>
 
 </sequenceFile>

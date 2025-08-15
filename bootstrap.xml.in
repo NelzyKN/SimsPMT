@@ -36,6 +36,10 @@
       type       = "XML" 
       xlink:href = "./EventFileExporter.xml"/>
       
+    <configLink
+      id         = "PhotonTriggerML"
+      type       = "XML"
+      xlink:href = "./PhotonTriggerML.xml"/>
 
     <configLink
        id         = "SStationListXMLManager"
@@ -43,26 +47,20 @@
        xlink:href = "./SIdealUpgradedStationList.xml"/>
        <!-- xlink:href = "./SIdealUpgradedStationListNoSmallPMT.xml"/> -->
        
-       <configLink
+    <configLink
        id         = "G4StationSimulator"
        type       = "XML" 
        xlink:href = "@CONFIGDIR@/G4StationSimulator.xml"/>
        
-
-	<configLink
+    <configLink
    	id         = "SDenseStationListXMLManager"
   	type       = "XML" 
    	xlink:href = "./SNoDenseStations.xml"/>
-
-
-
 
   </centralConfig>
 
   <parameterOverrides>
     <!-- Empty for now - the standard configuration will work -->
-    <!-- The simulation will produce traces of whatever length is configured -->
-    <!-- Our PMTTraceModule already handles variable-length traces correctly -->
   </parameterOverrides>
 
 </bootstrap>

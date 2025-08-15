@@ -1,112 +1,25 @@
 <?xml version="1.0" encoding="iso-8859-1"?>
 
-<!-- Configuration for PhotonTriggerML Module -->
-<!-- Machine Learning-based T1 Photon Trigger -->
+<!-- Configuration of PhotonTriggerML Module -->
 
 <PhotonTriggerML
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xsi:noNamespaceSchemaLocation='@SCHEMALOCATION@/PhotonTriggerML.xsd'>
 
   <!-- Energy range for trigger application -->
-  <EnergyRange>
-    <min unit="eV"> 1e18 </min>  <!-- 0.1 EeV -->
-    <max unit="eV"> 1e19 </max>  <!-- 1 EeV -->
-  </EnergyRange>
+  <EnergyMin unit="eV"> 1e18 </EnergyMin>
+  <EnergyMax unit="eV"> 1e19 </EnergyMax>
 
-  <!-- Neural Network Configuration -->
-  <NeuralNetwork>
-    <!-- Threshold for photon classification (0-1) -->
-    <photonThreshold> 0.5 </photonThreshold>
-    
-    <!-- Path to trained model weights (if available) -->
-    <modelFile> @DATADIR@/photon_trigger_model.dat </modelFile>
-    
-    <!-- Network architecture -->
-    <architecture>
-      <inputSize> 24 </inputSize>
-      <hidden1Size> 16 </hidden1Size>
-      <hidden2Size> 8 </hidden2Size>
-      <outputSize> 1 </outputSize>
-    </architecture>
-    
-    <!-- Quantization settings for FPGA deployment -->
-    <quantization>
-      <weightBits> 8 </weightBits>
-      <activationBits> 8 </activationBits>
-      <inputScale> 0.00392157 </inputScale>  <!-- 1/255 -->
-      <weightScale> 0.00787402 </weightScale> <!-- 1/127 -->
-    </quantization>
-  </NeuralNetwork>
+  <!-- Neural Network threshold for photon classification -->
+  <PhotonThreshold> 0.5 </PhotonThreshold>
 
-  <!-- Feature Extraction Parameters -->
-  <FeatureExtraction>
-    <!-- Baseline estimation -->
-    <baselineWindow> 100 </baselineWindow>  <!-- bins -->
-    
-    <!-- Time windows for segmented analysis -->
-    <timeWindows> 8 </timeWindows>
-    
-    <!-- Peak detection threshold (fraction of max) -->
-    <peakThreshold> 0.2 </peakThreshold>
-    
-    <!-- ADC to VEM conversion -->
-    <adcPerVEM> 180.0 </adcPerVEM>
-  </FeatureExtraction>
+  <!-- Output file -->
+  <OutputFile> photon_trigger_ml.root </OutputFile>
 
-  <!-- Trigger Logic Configuration -->
-  <TriggerLogic>
-    <!-- Apply T1 trigger decision -->
-    <applyTrigger> true </applyTrigger>
-    
-    <!-- Additional physics cuts -->
-    <minTotalCharge unit="VEM"> 1.0 </minTotalCharge>
-    <minPeakAmplitude unit="VEM"> 1.5 </minPeakAmplitude>
-    
-    <!-- High confidence photon threshold -->
-    <highConfidenceThreshold> 0.8 </highConfidenceThreshold>
-    
-    <!-- Dynamic threshold adjustment -->
-    <dynamicThreshold>
-      <enable> true </enable>
-      <targetRate unit="Hz"> 100 </targetRate>
-      <adjustmentStep> 0.01 </adjustmentStep>
-    </dynamicThreshold>
-  </TriggerLogic>
+  <!-- Save features for analysis -->
+  <SaveFeatures> true </SaveFeatures>
 
-  <!-- Performance Monitoring -->
-  <Performance>
-    <!-- Save features for offline analysis -->
-    <saveFeatures> true </saveFeatures>
-    
-    <!-- Performance targets -->
-    <targets>
-      <efficiencyImprovement> 0.5 </efficiencyImprovement>  <!-- 50% -->
-      <backgroundReduction> 0.3 </backgroundReduction>      <!-- 30% -->
-    </targets>
-    
-    <!-- ROC curve generation -->
-    <generateROC> true </generateROC>
-    <rocSteps> 20 </rocSteps>
-  </Performance>
-
-  <!-- Output Configuration -->
-  <Output>
-    <fileName> photon_trigger_ml.root </fileName>
-    <saveHistograms> true </saveHistograms>
-    <saveTrees> true </saveTrees>
-    <verbosity> 1 </verbosity>
-  </Output>
-
-  <!-- Hardware Deployment Settings (for future FPGA implementation) -->
-  <HardwareDeployment>
-    <!-- FPGA resource constraints -->
-    <maxLatency unit="microseconds"> 1.0 </maxLatency>
-    <maxLUTs> 10000 </maxLUTs>
-    <maxDSPs> 50 </maxDSPs>
-    
-    <!-- Pipeline configuration -->
-    <pipelineDepth> 3 </pipelineDepth>
-    <parallelChannels> 3 </parallelChannels>  <!-- 3 PMTs -->
-  </HardwareDeployment>
+  <!-- Apply trigger decision -->
+  <ApplyTrigger> true </ApplyTrigger>
 
 </PhotonTriggerML>
