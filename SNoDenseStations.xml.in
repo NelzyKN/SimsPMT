@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+
+<SDenseStationList>
+
+  <isUUB> 1 </isUUB>
+  <hasSmallPMT> 0 </hasSmallPMT>
+  <hasScintillator> 1 </hasScintillator>
+
+  <UTMInfo>
+    <ellipsoid> WGS84 </ellipsoid>
+    <zone> 19 </zone>
+    <band> H </band>
+  </UTMInfo>
+
+</SDenseStationList>
+
