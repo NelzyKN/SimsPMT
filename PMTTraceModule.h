@@ -5,15 +5,15 @@
  * \file PMTTraceModule.h
  * \brief Module to extract PMT traces from CORSIKA shower simulations
  * 
- * This module reads CORSIKA shower data and extracts FADC traces
- * from PMT simulation data. The traces are saved to a ROOT file
- * for further analysis.
+ * Enhanced version that identifies and stores trigger types (MOPS, ToTD, etc.)
+ * for each signal, providing detailed trigger analysis capabilities.
  */
 
 #include <fwk/VModule.h>
-#include <utl/TimeDistribution.h>  // Include full definition
+#include <utl/TimeDistribution.h>
 #include <string>
 #include <vector>
+#include <map>
 
 class TFile;
 class TTree;
@@ -25,7 +25,6 @@ namespace evt { class Event; }
 namespace sevt { 
     class Station; 
     class PMT;
-    // TraceI is defined in PMT headers
 }
 
 class PMTTraceModule : public fwk::VModule {
@@ -62,6 +61,13 @@ private:
     double fStationY;
     double fDistance;
     
+    // Trigger information
+    std::string fTriggerType;        // MOPS, ToTD, Threshold, etc.
+    std::string fTriggerAlgorithm;   // Full algorithm name
+    bool fIsT1;                       // T1 trigger flag
+    bool fIsT2;                       // T2 trigger flag
+    std::map<std::string, int> fTriggerCounts;  // Counter for each trigger type
+    
     // Trace data
     std::vector<double> fTraceData;
     int fTraceSize;
@@ -74,7 +80,7 @@ private:
     TFile* fOutputFile;
     TTree* fTraceTree;
     
-    // Histograms
+    // General histograms
     TH1D* hEventEnergy;
     TH1D* hZenithAngle;
     TH1D* hNStations;
@@ -84,6 +90,15 @@ private:
     TH1D* hTotalCharge;
     TH1D* hVEMCharge;
     TH2D* hChargeVsDistance;
+    
+    // Trigger-specific histograms
+    TH1D* hTriggerTypes;              // Summary of trigger types
+    TH1D* hVEMChargeMOPS;            // VEM charge for MOPS triggers
+    TH1D* hVEMChargeToTD;            // VEM charge for ToTD triggers
+    TH1D* hVEMChargeThreshold;       // VEM charge for Threshold triggers
+    TH1D* hVEMChargeOther;           // VEM charge for other triggers
+    TH2D* hChargeVsDistanceMOPS;     // Charge vs distance for MOPS
+    TH2D* hChargeVsDistanceToTD;     // Charge vs distance for ToTD
     
     // Trace histogram storage
     TObjArray* fTraceHistograms;
