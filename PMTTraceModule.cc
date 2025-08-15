@@ -249,29 +249,36 @@ void PMTTraceModule::ProcessStations(const Event& event)
         const sevt::Station& station = *it;
         fStationId = station.GetId();
         
-        // Check if station has trigger data and was actually triggered
-        if (!station.HasTriggerData()) {
-            continue;
-        }
-        
-        const sevt::StationTriggerData& triggerData = station.GetTriggerData();
-        
-        // Only process stations that actually triggered (T1 or T2)
-        // Skip silent triggers and error states
-        if (triggerData.IsSilent() || triggerData.GetErrorCode() != 0) {
-            continue;
-        }
-        
-        // Check if it's a valid trigger (T1 or T2)
-        bool isT1 = triggerData.IsT1();
-        bool isT2 = triggerData.IsT2();
-        
-        if (!isT1 && !isT2) {
-            continue;
-        }
-        
-        // For simulations, also check if station has simulation data
+        // For simulations, we need stations with simulation data
+        // This means they were hit by particles from the shower
         if (!station.HasSimData()) {
+            continue;
+        }
+        
+        // Check if station has trigger data (optional for simulations)
+        bool hasValidTrigger = false;
+        if (station.HasTriggerData()) {
+            const sevt::StationTriggerData& triggerData = station.GetTriggerData();
+            
+            // Check if it's a valid trigger (not silent, no errors)
+            if (!triggerData.IsSilent() && triggerData.GetErrorCode() == 0) {
+                // Check if it's T1 or T2
+                hasValidTrigger = triggerData.IsT1() || triggerData.IsT2(); //used T1 checks previously too
+                //hasValidTrigger = triggerData.IsT2();
+                
+                if (hasValidTrigger && fTracesFound <= 5) {
+                    ostringstream msg;
+                    msg << "Station " << fStationId << " has trigger: " 
+                        << (triggerData.IsT1() ? "T1" : "T2") 
+                        << ", Algorithm: " << triggerData.GetAlgorithmName();
+                    INFO(msg.str());
+                }
+            }
+        }
+        
+        // For simulations without trigger data, we process all stations with sim data
+        // For simulations with trigger data, we only process triggered stations
+        if (station.HasTriggerData() && !hasValidTrigger) {
             continue;
         }
         
@@ -295,10 +302,9 @@ void PMTTraceModule::ProcessStations(const Event& event)
         
         if (fTracesFound <= 5 && tracesThisStation > 0) {
             ostringstream msg;
-            msg << "Station " << fStationId << " triggered with " 
-                << (isT1 ? "T1" : "T2") << " trigger, "
-                << "Algorithm: " << triggerData.GetAlgorithmName()
-                << ", Distance: " << fDistance << " m";
+            msg << "Station " << fStationId << " processed"
+                << ", Distance: " << fDistance << " m"
+                << ", Traces found: " << tracesThisStation;
             INFO(msg.str());
         }
     }
@@ -306,6 +312,13 @@ void PMTTraceModule::ProcessStations(const Event& event)
     if (nStations > 0) {
         hNStations->Fill(nStations);
         hNTracesPerEvent->Fill(nTracesThisEvent);
+    }
+    
+    if (fEventCount <= 10) {
+        ostringstream msg;
+        msg << "Event " << fEventCount << ": Processed " << nStations 
+            << " stations with sim data, found " << nTracesThisEvent << " traces";
+        INFO(msg.str());
     }
 }
 
