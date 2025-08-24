@@ -12,7 +12,7 @@
 
     <!-- Read proton showers at 10^17.0 eV (0.1 EeV) -->
     <InputFilenames>
-      `find /afs/auger.mtu.edu/common/data/pauger_SIM_SHOWERS/protons/corsika_77420_Auger_lib/SibyllStar/18.0_18.5/proton/ -type f -name "DAT*" ! -name "*.*" `
+      `find /afs/auger.mtu.edu/common/data/pauger_SIM_SHOWERS/protons/corsika_77420_Auger_lib/SibyllStar/18.0_18.5/proton/ -name "DAT*" ! -name "DAT*.*" `
     </InputFilenames>
 
     <PatternPath> * </PatternPath>
