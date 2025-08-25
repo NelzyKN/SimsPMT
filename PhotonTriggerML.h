@@ -3,38 +3,32 @@
 
 /**
  * \file PhotonTriggerML.h
- * \brief ML-based photon trigger module for the Pierre Auger Observatory
+ * \brief Enhanced ML-based photon trigger module with real neural network
  * 
- * This module implements a machine learning-based trigger system designed to
- * discriminate between photon-induced and hadronic air showers in real-time.
- * It extracts key features from PMT FADC traces and applies a lightweight
- * neural network-inspired scoring algorithm to identify photon candidates.
- * 
- * The module targets:
- * - 50% improvement in photon detection efficiency
- * - 30% reduction in background hadronic triggers
- * - Sensitivity to photon fluxes ~10^-4 km^-2 yr^-1 at 10^19 eV
+ * This improved version implements a lightweight feedforward neural network
+ * with proper training capabilities and better feature engineering.
+ * Designed for FPGA deployment with 8-bit quantized weights.
  * 
  * Author: Khoa Nguyen
  * Institution: Michigan Technological University
- * Supervisor: David F. Nitz
  * Date: 2025
- * 
- * Part of PhD research on "Development of Advanced Photon Triggers 
- * for the Pierre Auger Collaboration"
  */
 
 #include <fwk/VModule.h>
 #include <vector>
 #include <string>
 #include <map>
-#include <fstream>  // Added for log file
+#include <fstream>
+#include <memory>
+#include <array>
+#include <cmath>  // For exp() function in Sigmoid
 
 // Forward declarations
 class TFile;
 class TTree;
 class TH1D;
 class TH2D;
+class TGraph;
 
 namespace evt { class Event; }
 namespace sevt { 
@@ -44,249 +38,286 @@ namespace sevt {
 
 /**
  * \class PhotonTriggerML
- * \brief Machine learning-based photon trigger for Surface Detector stations
- * 
- * This module processes FADC traces from water-Cherenkov detectors to identify
- * photon-induced air showers based on their characteristic electromagnetic
- * signatures. The algorithm uses features such as signal rise time, smoothness,
- * and temporal distribution to discriminate photons from hadronic backgrounds.
+ * \brief Enhanced machine learning photon trigger with real neural network
  */
 class PhotonTriggerML : public fwk::VModule {
 public:
-    /**
-     * \brief Constructor - initializes counters and pointers
-     */
     PhotonTriggerML();
-    
-    /**
-     * \brief Destructor - cleanup (file closing handled in Finish)
-     */
     virtual ~PhotonTriggerML();
     
-    /**
-     * \brief Initialize the module
-     * 
-     * Creates output ROOT file, initializes histograms and TTrees,
-     * and sets up the ML discriminator parameters.
-     * 
-     * \return eSuccess if initialization successful, eFailure otherwise
-     */
     fwk::VModule::ResultFlag Init();
-    
-    /**
-     * \brief Process one event
-     * 
-     * Main processing method called once per event. Loops through all
-     * stations and PMTs, extracts FADC traces, calculates features,
-     * and applies ML discrimination.
-     * 
-     * \param event Reference to the current event data
-     * \return eSuccess if processing successful
-     */
     fwk::VModule::ResultFlag Run(evt::Event& event);
-    
-    /**
-     * \brief Finalize the module
-     * 
-     * Calculates final statistics, writes all data to file,
-     * and prints summary information.
-     * 
-     * \return eSuccess if finalization successful
-     */
     fwk::VModule::ResultFlag Finish();
     
-    // Signal handling - public for signal handler access
-    static PhotonTriggerML* fInstance;  ///< Static instance for signal handler
-    
-    /**
-     * \brief Save data and display summary on interrupt
-     * 
-     * Called when Ctrl+C is pressed to save partial results
-     */
+    // Signal handling
+    static PhotonTriggerML* fInstance;
     void SaveAndDisplaySummary();
     
-    /**
-     * \brief Get primary particle type for external access
-     * 
-     * Used by PMTTraceModule to include particle type in histograms
-     */
+    // Primary type access
     std::string GetPrimaryType() const { return fPrimaryType; }
     int GetPrimaryId() const { return fPrimaryId; }
     
     /**
-     * \struct Features
-     * \brief Container for extracted FADC trace features
-     * 
-     * These features are used by the ML algorithm to discriminate
-     * between photon and hadronic showers. Made public for MLResult struct.
+     * \struct EnhancedFeatures
+     * \brief Improved feature set based on photon shower characteristics
      */
-    struct Features {
-        double risetime;           ///< Rise time from 10% to 90% of peak [ns]
-        double falltime;           ///< Fall time from 90% to 10% of peak [ns]
-        double peak_charge_ratio;  ///< Ratio of peak amplitude to total charge
-        double smoothness;         ///< RMS of second derivative (signal smoothness)
-        double early_late_ratio;   ///< Ratio of early to late charge in trace
-        int num_peaks;            ///< Number of significant peaks in trace
-        double total_charge;      ///< Total integrated charge [VEM]
-        double peak_amplitude;    ///< Peak amplitude [VEM]
+    struct EnhancedFeatures {
+        // Temporal features
+        double risetime_10_50;     ///< Rise time from 10% to 50% of peak [ns]
+        double risetime_10_90;     ///< Rise time from 10% to 90% of peak [ns]
+        double falltime_90_10;     ///< Fall time from 90% to 10% [ns]
+        double pulse_width;        ///< FWHM of main pulse [ns]
+        double asymmetry;          ///< (falltime - risetime)/(falltime + risetime)
+        
+        // Amplitude features
+        double peak_amplitude;     ///< Peak amplitude [VEM]
+        double total_charge;       ///< Total integrated charge [VEM]
+        double peak_charge_ratio;  ///< Peak/total charge ratio
+        
+        // Shape features
+        double smoothness;         ///< RMS of second derivative
+        double kurtosis;          ///< Fourth moment (peakedness)
+        double skewness;          ///< Third moment (asymmetry)
+        
+        // Temporal distribution
+        double early_fraction;     ///< Fraction of charge in first 25%
+        double late_fraction;      ///< Fraction of charge in last 25%
+        double time_spread;        ///< RMS time spread [ns]
+        
+        // Frequency domain (simple)
+        double high_freq_content;  ///< High frequency power ratio
+        
+        // Multi-peak structure
+        int num_peaks;            ///< Number of significant peaks
+        double secondary_peak_ratio; ///< Ratio of 2nd largest to largest peak
+        
+        EnhancedFeatures() : 
+            risetime_10_50(0), risetime_10_90(0), falltime_90_10(0),
+            pulse_width(0), asymmetry(0), peak_amplitude(0),
+            total_charge(0), peak_charge_ratio(0), smoothness(0),
+            kurtosis(0), skewness(0), early_fraction(0),
+            late_fraction(0), time_spread(0), high_freq_content(0),
+            num_peaks(0), secondary_peak_ratio(0) {}
+    };
+    
+    /**
+     * \class NeuralNetwork
+     * \brief Lightweight feedforward neural network for photon discrimination
+     * 
+     * 3-layer network with ReLU activation, designed for FPGA implementation
+     * Uses 8-bit quantized weights for efficient hardware deployment
+     */
+    class NeuralNetwork {
+    public:
+        NeuralNetwork();
+        ~NeuralNetwork() = default;
+        
+        /**
+         * \brief Initialize network with random weights
+         * \param input_size Number of input features (17 for EnhancedFeatures)
+         * \param hidden1_size First hidden layer size (default 32)
+         * \param hidden2_size Second hidden layer size (default 16)
+         */
+        void Initialize(int input_size = 17, int hidden1_size = 32, int hidden2_size = 16);
+        
+        /**
+         * \brief Forward pass through the network
+         * \param features Input feature vector
+         * \return Photon probability (0-1)
+         */
+        double Predict(const std::vector<double>& features);
+        
+        /**
+         * \brief Train the network on a batch of examples
+         * \param features Batch of feature vectors
+         * \param labels Batch of labels (1 for photon, 0 for hadron)
+         * \param learning_rate Learning rate (default 0.001)
+         * \return Average loss for the batch
+         */
+        double Train(const std::vector<std::vector<double>>& features,
+                    const std::vector<int>& labels,
+                    double learning_rate = 0.001);
+        
+        /**
+         * \brief Save network weights to file
+         * \param filename Output file name
+         */
+        void SaveWeights(const std::string& filename);
+        
+        /**
+         * \brief Load network weights from file
+         * \param filename Input file name
+         * \return true if successful
+         */
+        bool LoadWeights(const std::string& filename);
+        
+        /**
+         * \brief Quantize weights to 8-bit for FPGA deployment
+         */
+        void QuantizeWeights();
+        
+    private:
+        // Network architecture
+        int fInputSize;
+        int fHidden1Size;
+        int fHidden2Size;
+        
+        // Weight matrices (row-major storage)
+        std::vector<std::vector<double>> fWeights1;  ///< Input to hidden1
+        std::vector<std::vector<double>> fWeights2;  ///< Hidden1 to hidden2
+        std::vector<std::vector<double>> fWeights3;  ///< Hidden2 to output
+        
+        // Bias vectors
+        std::vector<double> fBias1;
+        std::vector<double> fBias2;
+        double fBias3;
+        
+        // Activation function (ReLU)
+        double ReLU(double x) { return x > 0 ? x : 0; }
+        double ReLUDerivative(double x) { return x > 0 ? 1 : 0; }
+        
+        // Sigmoid for output layer
+        double Sigmoid(double x) { return 1.0 / (1.0 + exp(-x)); }
+        
+        // Quantization parameters
+        bool fIsQuantized;
+        double fQuantizationScale;
     };
     
     /**
      * \struct MLResult
-     * \brief Container for ML analysis results per station
+     * \brief Enhanced ML analysis results
      */
     struct MLResult {
-        double photonScore;      ///< ML photon probability score (0-1)
-        bool identifiedAsPhoton; ///< True if score > threshold
-        bool isActualPhoton;     ///< True if primary is photon
-        double vemCharge;        ///< Total VEM charge
-        Features features;       ///< Extracted features
-        std::string primaryType; ///< Primary particle type
+        double photonScore;
+        bool identifiedAsPhoton;
+        bool isActualPhoton;
+        double vemCharge;
+        EnhancedFeatures features;
+        std::string primaryType;
+        double confidence;  ///< Confidence level (distance from 0.5)
         
         MLResult() : photonScore(0), identifiedAsPhoton(false), 
-                    isActualPhoton(false), vemCharge(0), primaryType("Unknown") {}
+                    isActualPhoton(false), vemCharge(0), 
+                    primaryType("Unknown"), confidence(0) {}
     };
     
-    /**
-     * \brief Get ML results for a specific station
-     * 
-     * Used by PMTTraceModule to access ML analysis results
-     * 
-     * \param stationId The station ID to query
-     * \param result Output parameter filled with ML results
-     * \return True if results exist for this station
-     */
+    // Static methods for inter-module communication
     static bool GetMLResultForStation(int stationId, MLResult& result);
-    
-    /**
-     * \brief Clear all stored ML results
-     * 
-     * Called at the beginning of each event
-     */
     static void ClearMLResults();
     
 private:
+    /**
+     * \brief Extract enhanced features from FADC trace
+     * \param trace FADC trace data (2048 bins)
+     * \param baseline Baseline ADC value
+     * \return Enhanced feature set
+     */
+    EnhancedFeatures ExtractEnhancedFeatures(const std::vector<double>& trace, 
+                                             double baseline = 50.0);
     
     /**
-     * \brief Extract features from FADC trace
-     * 
-     * Analyzes a PMT FADC trace to extract discriminating features
-     * that characterize photon vs hadronic showers.
-     * 
-     * \param trace Vector containing FADC trace data (2048 bins)
-     * \param baseline Baseline ADC value (default 50 for simulation)
-     * \return Features struct containing extracted characteristics
+     * \brief Normalize features for neural network input
+     * \param features Raw features
+     * \return Normalized feature vector
      */
-    Features ExtractFeatures(const std::vector<double>& trace, double baseline = 50.0);
-    
-    /**
-     * \brief Calculate photon probability score
-     * 
-     * Applies ML-inspired scoring algorithm to determine likelihood
-     * that the signal originated from a photon-induced shower.
-     * Uses weighted combination of features based on photon characteristics:
-     * - Shorter rise times (electromagnetic cascade)
-     * - Smoother signals (less muon content)
-     * - Higher early/late ratio (faster development)
-     * 
-     * \param features Extracted trace features
-     * \return Photon score between 0 (hadron-like) and 1 (photon-like)
-     */
-    double CalculatePhotonScore(const Features& features);
+    std::vector<double> NormalizeFeatures(const EnhancedFeatures& features);
     
     /**
      * \brief Process a single station
-     * 
-     * Loops through all PMTs in a station, extracts FADC traces,
-     * and applies photon discrimination. Handles both direct PMT
-     * trace access and simulation data fallback.
-     * 
-     * \param station Reference to the station to process
+     * \param station Station to process
      */
     void ProcessStation(const sevt::Station& station);
     
     /**
-     * \brief Write ML analysis to log file
-     * 
-     * Writes detailed ML analysis results, confusion matrix,
-     * and performance metrics to the log file.
+     * \brief Train the neural network on accumulated data
+     */
+    void TrainNetwork();
+    
+    /**
+     * \brief Calculate performance metrics
+     */
+    void CalculatePerformanceMetrics();
+    
+    /**
+     * \brief Write analysis to log file
      */
     void WriteMLAnalysisToLog();
     
-    // ===== Event and Station Counters =====
-    int fEventCount;          ///< Total number of events processed
-    int fStationCount;        ///< Total number of stations with valid traces
-    int fPhotonLikeCount;     ///< Number of photon-like signals (score > 0.5)
-    int fHadronLikeCount;     ///< Number of hadron-like signals (score <= 0.5)
+    // Neural network
+    std::unique_ptr<NeuralNetwork> fNeuralNetwork;
     
-    // ===== Current Event Data =====
-    double fEnergy;           ///< Primary particle energy [eV]
-    double fCoreX;            ///< Shower core X position [m]
-    double fCoreY;            ///< Shower core Y position [m]
-    int fPrimaryId;           ///< Primary particle ID from simulation
-    std::string fPrimaryType; ///< Primary particle type (photon, proton, iron, etc.)
+    // Training data accumulation
+    std::vector<std::vector<double>> fTrainingFeatures;
+    std::vector<int> fTrainingLabels;
+    bool fIsTraining;
+    int fTrainingEpochs;
     
-    // ===== Current Station/PMT Data =====
-    double fPhotonScore;      ///< ML photon probability score (0-1)
-    double fDistance;         ///< Distance from shower core [m]
-    int fStationId;          ///< Current station ID
-    bool fIsActualPhoton;     ///< True if primary particle is a photon
-    Features fFeatures;       ///< Current trace features
+    // Event and station counters
+    int fEventCount;
+    int fStationCount;
+    int fPhotonLikeCount;
+    int fHadronLikeCount;
     
-    // ===== Output File and Trees =====
-    TFile* fOutputFile;       ///< Output ROOT file
-    TTree* fMLTree;          ///< Tree containing ML analysis results
+    // Current event data
+    double fEnergy;
+    double fCoreX;
+    double fCoreY;
+    int fPrimaryId;
+    std::string fPrimaryType;
     
-    // ===== Log File =====
-    std::string fLogFileName; ///< Name of the log file
-    std::ofstream fLogFile;   ///< Log file for ML analysis results
+    // Current station data
+    double fPhotonScore;
+    double fConfidence;
+    double fDistance;
+    int fStationId;
+    bool fIsActualPhoton;
+    EnhancedFeatures fFeatures;
     
-    // ===== Analysis Histograms =====
+    // Output files
+    TFile* fOutputFile;
+    TTree* fMLTree;
+    std::string fLogFileName;
+    std::ofstream fLogFile;
     
-    // 1D Histograms
-    TH1D* hPhotonScore;       ///< Distribution of photon scores
-    TH1D* hRisetime;         ///< Distribution of signal rise times
-    TH1D* hSmoothness;       ///< Distribution of signal smoothness values
-    TH1D* hEarlyLateRatio;   ///< Distribution of early/late charge ratios
-    TH1D* hTotalCharge;      ///< Distribution of total charge (VEM)
+    // Histograms
+    TH1D* hPhotonScore;
+    TH1D* hPhotonScorePhotons;
+    TH1D* hPhotonScoreHadrons;
+    TH1D* hConfidence;
+    TH1D* hRisetime;
+    TH1D* hAsymmetry;
+    TH1D* hKurtosis;
+    TH2D* hScoreVsEnergy;
+    TH2D* hScoreVsDistance;
+    TGraph* gROCCurve;
     
-    // 2D Correlation Histograms
-    TH2D* hScoreVsEnergy;    ///< Photon score vs primary energy
-    TH2D* hScoreVsDistance;  ///< Photon score vs core distance
+    // Performance metrics
+    int fTruePositives;
+    int fFalsePositives;
+    int fTrueNegatives;
+    int fFalseNegatives;
     
-    // Performance Analysis Histograms
-    TH1D* hPhotonScorePhotons; ///< Score distribution for true photons
-    TH1D* hPhotonScoreHadrons; ///< Score distribution for true hadrons
-    TH2D* hROCCurve;           ///< ROC curve for ML performance
+    // Configuration
+    double fPhotonThreshold;
+    double fEnergyMin;
+    double fEnergyMax;
+    std::string fOutputFileName;
+    std::string fWeightsFileName;
+    bool fLoadPretrainedWeights;
     
-    // ===== Performance Metrics =====
-    int fTruePositives;      ///< Photon correctly identified as photon
-    int fFalsePositives;     ///< Hadron incorrectly identified as photon
-    int fTrueNegatives;      ///< Hadron correctly identified as hadron
-    int fFalseNegatives;     ///< Photon incorrectly identified as hadron
+    // Feature normalization parameters (computed from training data)
+    std::vector<double> fFeatureMeans;
+    std::vector<double> fFeatureStdDevs;
     
-    // ===== Trigger Configuration =====
-    double fPhotonThreshold;  ///< Threshold for photon classification (default 0.5)
-    double fEnergyMin;        ///< Minimum energy for trigger [eV]
-    double fEnergyMax;        ///< Maximum energy for trigger [eV]
-    std::string fOutputFileName; ///< Name of output ROOT file
+    // Trigger type analysis
+    std::map<std::string, int> fTriggerCounts;
+    std::map<std::string, int> fParticleTypeCounts;
+    std::map<std::string, int> fParticleTypePhotonLike;
     
-    // ===== Trigger Type Analysis =====
-    std::map<std::string, int> fTriggerCounts; ///< Count of stations by trigger type
+    // Static ML results storage
+    static std::map<int, MLResult> fMLResultsMap;
     
-    // ===== Particle Type Statistics =====
-    std::map<std::string, int> fParticleTypeCounts; ///< Count of events by particle type
-    std::map<std::string, int> fParticleTypePhotonLike; ///< Photon-like counts by particle type
-    
-    // ===== Static ML Results Storage =====
-    static std::map<int, MLResult> fMLResultsMap; ///< ML results by station ID for inter-module communication
-    
-    /**
-     * \brief Register module with framework
-     * 
-     * This macro registers the PhotonTriggerML module with the Auger Offline
-     * framework, allowing it to be invoked via XML configuration files.
-     */
     REGISTER_MODULE("PhotonTriggerML", PhotonTriggerML);
 };
 
