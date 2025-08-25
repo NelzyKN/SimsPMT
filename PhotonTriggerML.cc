@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <csignal>
 #include <iomanip>
+#include <ctime>
 
 using namespace std;
 using namespace fwk;
@@ -48,6 +49,9 @@ using namespace utl;
 
 // Static instance pointer for signal handler
 PhotonTriggerML* PhotonTriggerML::fInstance = 0;
+
+// Static ML results map for inter-module communication
+std::map<int, PhotonTriggerML::MLResult> PhotonTriggerML::fMLResultsMap;
 
 // Signal handler function
 void PhotonTriggerMLSignalHandler(int signal)
@@ -80,6 +84,7 @@ PhotonTriggerML::PhotonTriggerML() :
     fIsActualPhoton(false),
     fOutputFile(nullptr),
     fMLTree(nullptr),
+    fLogFileName("photon_trigger_ml_analysis.log"),
     hPhotonScore(nullptr),
     hRisetime(nullptr),
     hSmoothness(nullptr),
@@ -97,6 +102,10 @@ PhotonTriggerML::PhotonTriggerML() :
 {
     // Features struct will be initialized with default values
     fInstance = this;  // Set static instance pointer
+    fPhotonThreshold = 0.5;  // Default threshold
+    fEnergyMin = 1e18;       // Default min energy [eV]
+    fEnergyMax = 1e19;       // Default max energy [eV]
+    fOutputFileName = "photon_trigger_ml.root";  // Default output file
 }
 
 // Destructor
@@ -111,20 +120,42 @@ VModule::ResultFlag PhotonTriggerML::Init()
 {
     INFO("PhotonTriggerML::Init() - Initializing ML-based photon trigger");
     
+    // Open log file
+    fLogFile.open(fLogFileName.c_str());
+    if (!fLogFile.is_open()) {
+        ERROR("Failed to open log file: " + fLogFileName);
+        return eFailure;
+    }
+    
+    // Write header to log file
+    time_t now = time(0);
+    fLogFile << "==========================================" << endl;
+    fLogFile << "PhotonTriggerML Analysis Log" << endl;
+    fLogFile << "Date: " << ctime(&now);
+    fLogFile << "==========================================" << endl << endl;
+    
+    fLogFile << "=== PhotonTriggerML Configuration ===" << endl;
+    fLogFile << "Energy range: 10^18 - 10^19 eV" << endl;
+    fLogFile << "Target: 50% efficiency improvement" << endl;
+    fLogFile << "ML discriminator: Lightweight neural network" << endl;
+    fLogFile << "=====================================\n" << endl;
+    
     INFO("=== PhotonTriggerML Configuration ===");
     INFO("Energy range: 10^18 - 10^19 eV");
     INFO("Target: 50% efficiency improvement");
     INFO("ML discriminator: Lightweight neural network");
+    INFO("Log file: " + fLogFileName);
     INFO("=====================================");
     
     // Create output file
     fOutputFile = new TFile("photon_trigger_ml.root", "RECREATE");
     if (!fOutputFile || fOutputFile->IsZombie()) {
         ERROR("Failed to create output file");
+        fLogFile << "ERROR: Failed to create ROOT output file" << endl;
         return eFailure;
     }
     
-    // Create tree
+    // Create tree with particle type information
     fMLTree = new TTree("MLTree", "Photon Trigger ML Analysis");
     fMLTree->Branch("eventId", &fEventCount, "eventId/I");
     fMLTree->Branch("stationId", &fStationId, "stationId/I");
@@ -140,8 +171,8 @@ VModule::ResultFlag PhotonTriggerML::Init()
     fMLTree->Branch("total_charge", &fFeatures.total_charge, "total_charge/D");
     fMLTree->Branch("num_peaks", &fFeatures.num_peaks, "num_peaks/I");
     
-    // Create histograms
-    hPhotonScore = new TH1D("hPhotonScore", "Photon Score;Score;Count", 100, 0, 1);
+    // Create histograms with particle type labels
+    hPhotonScore = new TH1D("hPhotonScore", "Photon Score (All Particles);Score;Count", 100, 0, 1);
     hRisetime = new TH1D("hRisetime", "Rise Time;Time [ns];Count", 50, 0, 500);
     hSmoothness = new TH1D("hSmoothness", "Signal Smoothness;RMS;Count", 50, 0, 100);
     hEarlyLateRatio = new TH1D("hEarlyLateRatio", "Early/Late Ratio;Ratio;Count", 50, 0, 10);
@@ -161,6 +192,9 @@ VModule::ResultFlag PhotonTriggerML::Init()
     signal(SIGTSTP, PhotonTriggerMLSignalHandler);
     INFO("Signal handlers installed - use Ctrl+C to interrupt and save partial results");
     
+    fLogFile << "PhotonTriggerML initialized successfully" << endl;
+    fLogFile << "Waiting for events...\n" << endl;
+    
     INFO("PhotonTriggerML initialized successfully");
     INFO("Waiting for events...");
     
@@ -172,6 +206,9 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
 {
     fEventCount++;
     
+    // Clear ML results from previous event
+    ClearMLResults();
+    
     // More frequent status updates initially
     if (fEventCount <= 20 || fEventCount % 50 == 0) {
         ostringstream msg;
@@ -179,6 +216,14 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
             << " | Stations processed: " << fStationCount 
             << " | Photon-like: " << fPhotonLikeCount;
         INFO(msg.str());
+        
+        // Also log to file
+        if (fEventCount % 50 == 0) {
+            fLogFile << "Event " << fEventCount 
+                    << " | Stations: " << fStationCount 
+                    << " | Photon-like: " << fPhotonLikeCount 
+                    << " | Hadron-like: " << fHadronLikeCount << endl;
+        }
     }
     
     // Get shower information
@@ -228,6 +273,9 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
                 break;
         }
         
+        // Update particle type statistics
+        fParticleTypeCounts[fPrimaryType]++;
+        
         // Debug: Log energy and particle type for first few events
         if (fEventCount <= 10) {
             ostringstream msg;
@@ -236,6 +284,9 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
                 << " | Energy: " << fEnergy/1e18 << " EeV"
                 << " | IsPhoton: " << (fIsActualPhoton ? "YES" : "NO");
             INFO(msg.str());
+            
+            // Also write to log file
+            fLogFile << msg.str() << endl;
         }
         
         // Get core position
@@ -249,6 +300,7 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
     } else {
         if (fEventCount <= 10) {
             INFO("  Event has no SimShower data");
+            fLogFile << "  Event " << fEventCount << " has no SimShower data" << endl;
         }
     }
     
@@ -270,13 +322,18 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
             msg << "  Event " << fEventCount << " has " << stationsInEvent 
                 << " stations in SEvent";
             if (hasShower) {
-                msg << " (E=" << fEnergy/1e18 << " EeV)";
+                msg << " (E=" << fEnergy/1e18 << " EeV, Primary=" << fPrimaryType << ")";
             }
             INFO(msg.str());
+            
+            if (fEventCount <= 10) {
+                fLogFile << msg.str() << endl;
+            }
         }
     } else {
         if (fEventCount <= 10) {
             INFO("  Event has no SEvent data - no stations to process");
+            fLogFile << "  Event " << fEventCount << " has no SEvent data" << endl;
         }
     }
     
@@ -300,8 +357,13 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
         ostringstream msg;
         msg << "    Processing Station " << fStationId 
             << " (total #" << totalStationsProcessed << ")"
-            << ": HasSimData=" << (hasSimData ? "yes" : "no");
+            << ": HasSimData=" << (hasSimData ? "yes" : "no")
+            << ", Primary=" << fPrimaryType;
         INFO(msg.str());
+        
+        if (totalStationsProcessed <= 5) {
+            fLogFile << msg.str() << endl;
+        }
     }
     
     // Get station position and calculate distance
@@ -341,7 +403,7 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
         
         if (doDebug && totalStationsProcessed <= 10 && p == 0) {
             ostringstream msg;
-            msg << "      Checking PMT " << pmtId;
+            msg << "      Checking PMT " << pmtId << " (Primary: " << fPrimaryType << ")";
             INFO(msg.str());
         }
         
@@ -454,7 +516,8 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
             // Debug: Check if trace has any signal
             if (doDebug && totalStationsProcessed <= 10 && pmtsProcessed == 0) {
                 ostringstream msg;
-                msg << "      -> Trace range: [" << minVal << ", " << maxVal << "] ADC";
+                msg << "      -> Trace range: [" << minVal << ", " << maxVal << "] ADC"
+                    << " (Primary: " << fPrimaryType << ")";
                 INFO(msg.str());
             }
             
@@ -479,8 +542,19 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
             fStationCount++;
             bool identifiedAsPhoton = (fPhotonScore > 0.5);
             
+            // Store ML results for this station (for PMTTraceModule to access)
+            MLResult mlResult;
+            mlResult.photonScore = fPhotonScore;
+            mlResult.identifiedAsPhoton = identifiedAsPhoton;
+            mlResult.isActualPhoton = fIsActualPhoton;
+            mlResult.vemCharge = fFeatures.total_charge;  // VEM charge is stored in features
+            mlResult.features = fFeatures;
+            mlResult.primaryType = fPrimaryType;
+            fMLResultsMap[fStationId] = mlResult;
+            
             if (identifiedAsPhoton) {
                 fPhotonLikeCount++;
+                fParticleTypePhotonLike[fPrimaryType]++;
                 if (fIsActualPhoton) {
                     fTruePositives++;  // Correctly identified photon
                 } else {
@@ -500,11 +574,20 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
                 ostringstream msg;
                 msg << "  *** ML PROCESSED: Station " << fStationId << " PMT " << pmtId
                     << " | True: " << fPrimaryType 
-                    << " | Score: " << fPhotonScore
+                    << " | Score: " << fixed << setprecision(3) << fPhotonScore
                     << " | Prediction: " << (identifiedAsPhoton ? "PHOTON" : "HADRON")
                     << " | " << (identifiedAsPhoton == fIsActualPhoton ? "CORRECT" : "WRONG")
                     << " | Charge=" << fFeatures.total_charge << " VEM";
                 INFO(msg.str());
+                
+                // Log detailed results for first few
+                if (fStationCount <= 10) {
+                    fLogFile << msg.str() << endl;
+                    fLogFile << "      Features: risetime=" << fFeatures.risetime 
+                            << " ns, smoothness=" << fFeatures.smoothness
+                            << ", early/late=" << fFeatures.early_late_ratio
+                            << ", peaks=" << fFeatures.num_peaks << endl;
+                }
             }
             
             // Fill histograms
@@ -538,7 +621,7 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
     } else if (pmtsProcessed > 0 && totalStationsProcessed <= 5) {
         ostringstream msg;
         msg << "    -> Station " << fStationId << " complete: " 
-            << pmtsProcessed << " PMTs processed";
+            << pmtsProcessed << " PMTs processed (Primary: " << fPrimaryType << ")";
         INFO(msg.str());
     }
 }
@@ -688,6 +771,68 @@ double PhotonTriggerML::CalculatePhotonScore(const Features& features)
     return score;
 }
 
+// Write ML analysis to log file
+void PhotonTriggerML::WriteMLAnalysisToLog()
+{
+    if (!fLogFile.is_open()) return;
+    
+    fLogFile << "\n=== ML Analysis Summary ===" << endl;
+    fLogFile << "Events processed: " << fEventCount << endl;
+    fLogFile << "Stations analyzed: " << fStationCount << endl;
+    fLogFile << "Photon-like signals: " << fPhotonLikeCount << endl;
+    fLogFile << "Hadron-like signals: " << fHadronLikeCount << endl;
+    
+    // Particle type breakdown
+    fLogFile << "\n=== Particle Type Statistics ===" << endl;
+    for (const auto& entry : fParticleTypeCounts) {
+        fLogFile << "  " << entry.first << ": " << entry.second << " events";
+        if (fParticleTypePhotonLike.count(entry.first) > 0) {
+            int photonLike = fParticleTypePhotonLike[entry.first];
+            double percentage = (entry.second > 0) ? 100.0 * photonLike / entry.second : 0;
+            fLogFile << " (" << photonLike << " photon-like = " 
+                    << fixed << setprecision(1) << percentage << "%)";
+        }
+        fLogFile << endl;
+    }
+    
+    // Performance metrics
+    if (fStationCount > 0) {
+        fLogFile << "\n=== ML Performance Analysis ===" << endl;
+        fLogFile << "Confusion Matrix:" << endl;
+        fLogFile << "                 Predicted" << endl;
+        fLogFile << "           | Photon | Hadron |" << endl;
+        fLogFile << "Actual ----+--------+--------+" << endl;
+        fLogFile << "Photon     |  " << setw(5) << fTruePositives 
+                << " |  " << setw(5) << fFalseNegatives << " |" << endl;
+        fLogFile << "Hadron     |  " << setw(5) << fFalsePositives 
+                << " |  " << setw(5) << fTrueNegatives << " |" << endl << endl;
+        
+        // Calculate metrics
+        double accuracy = (double)(fTruePositives + fTrueNegatives) / fStationCount * 100.0;
+        double precision = 0, recall = 0, f1Score = 0;
+        
+        if (fTruePositives + fFalsePositives > 0) {
+            precision = (double)fTruePositives / (fTruePositives + fFalsePositives) * 100.0;
+        }
+        
+        if (fTruePositives + fFalseNegatives > 0) {
+            recall = (double)fTruePositives / (fTruePositives + fFalseNegatives) * 100.0;
+        }
+        
+        if (precision + recall > 0) {
+            f1Score = 2.0 * precision * recall / (precision + recall);
+        }
+        
+        fLogFile << "Performance Metrics:" << endl;
+        fLogFile << "  Accuracy:  " << fixed << setprecision(1) << accuracy << "%" << endl;
+        fLogFile << "  Precision: " << fixed << setprecision(1) << precision << "%" << endl;
+        fLogFile << "  Recall:    " << fixed << setprecision(1) << recall << "%" << endl;
+        fLogFile << "  F1-Score:  " << fixed << setprecision(1) << f1Score << "%" << endl;
+    }
+    
+    fLogFile << "===============================" << endl;
+}
+
 // SaveAndDisplaySummary method - called on interrupt
 void PhotonTriggerML::SaveAndDisplaySummary()
 {
@@ -698,6 +843,9 @@ void PhotonTriggerML::SaveAndDisplaySummary()
         << "Photon-like: " << fPhotonLikeCount << "\n"
         << "Hadron-like: " << fHadronLikeCount;
     INFO(msg.str());
+    
+    // Write to log file
+    WriteMLAnalysisToLog();
     
     // Print confusion matrix and performance metrics
     if (fStationCount > 0) {
@@ -781,6 +929,15 @@ void PhotonTriggerML::SaveAndDisplaySummary()
     } else {
         ERROR("Output file is null - cannot save data!");
     }
+    
+    // Close log file
+    if (fLogFile.is_open()) {
+        fLogFile << "\n=== Analysis completed ===" << endl;
+        time_t now = time(0);
+        fLogFile << "End time: " << ctime(&now) << endl;
+        fLogFile.close();
+        INFO("Log file saved: " + fLogFileName);
+    }
 }
 
 // Finish method
@@ -792,4 +949,21 @@ VModule::ResultFlag PhotonTriggerML::Finish()
     SaveAndDisplaySummary();
     
     return eSuccess;
+}
+
+// Static method to get ML results for a station
+bool PhotonTriggerML::GetMLResultForStation(int stationId, MLResult& result)
+{
+    auto it = fMLResultsMap.find(stationId);
+    if (it != fMLResultsMap.end()) {
+        result = it->second;
+        return true;
+    }
+    return false;
+}
+
+// Static method to clear all ML results
+void PhotonTriggerML::ClearMLResults()
+{
+    fMLResultsMap.clear();
 }

@@ -1,7 +1,8 @@
 // PMTTraceModule.cc
-// Enhanced version with correct trigger type checking based on T1RatesDFN.cc
+// Enhanced version with particle type in histogram titles and ML results
 
 #include "PMTTraceModule.h"
+#include "PhotonTriggerML.h"  // Added to access ML results
 
 #include <fwk/CentralConfig.h>
 #include <utl/ErrorLogger.h>
@@ -38,6 +39,7 @@
 #include <TPad.h>
 
 #include <iostream>
+#include <iomanip>
 #include <vector>
 #include <sstream>
 #include <cmath>
@@ -94,6 +96,12 @@ PMTTraceModule::PMTTraceModule() :
     fStationX(0),
     fStationY(0),
     fDistance(0),
+    fPrimaryId(0),
+    fPrimaryType("Unknown"),
+    fIsPhoton(false),
+    fMLPhotonScore(-1),
+    fMLIdentifiedAsPhoton(false),
+    fMLPrediction("No ML"),
     fTraceSize(0),
     fPeakBin(0),
     fPeakValue(0),
@@ -110,6 +118,10 @@ PMTTraceModule::PMTTraceModule() :
     hTotalCharge(0),
     hVEMCharge(0),
     hChargeVsDistance(0),
+    hParticleTypes(0),
+    hVEMChargePhoton(0),
+    hVEMChargeProton(0),
+    hVEMChargeIron(0),
     fTraceHistograms(0),
     fMaxHistograms(500)
 {
@@ -136,6 +148,7 @@ VModule::ResultFlag PMTTraceModule::Init()
     INFO("Total trace duration: 51.2 microseconds");
     INFO("Expected baseline: ~50 ADC (simulation) or ~350 ADC (real data)");
     INFO("Trigger types monitored: SB, ToT, ToTD, MOPS, EM, DL");
+    INFO("Primary particle types tracked in histograms");
     INFO("==========================================");
     
     // Create output file
@@ -172,11 +185,26 @@ VModule::ResultFlag PMTTraceModule::Init()
     hTriggerTypes->GetXaxis()->SetBinLabel(11, "Inferred-ToTD");
     hTriggerTypes->GetXaxis()->SetBinLabel(12, "Inferred-MOPS");
     
+    // Add particle type histogram
+    hParticleTypes = new TH1D("hParticleTypes", "Primary Particle Types;Type;Count", 10, 0, 10);
+    hParticleTypes->GetXaxis()->SetBinLabel(1, "Photon");
+    hParticleTypes->GetXaxis()->SetBinLabel(2, "Electron");
+    hParticleTypes->GetXaxis()->SetBinLabel(3, "Proton");
+    hParticleTypes->GetXaxis()->SetBinLabel(4, "Iron");
+    hParticleTypes->GetXaxis()->SetBinLabel(5, "Muon");
+    hParticleTypes->GetXaxis()->SetBinLabel(6, "Nucleus");
+    hParticleTypes->GetXaxis()->SetBinLabel(7, "Unknown");
+    
     // VEM charge per trigger type
     hVEMChargeMOPS = new TH1D("hVEMChargeMOPS", "VEM Charge (MOPS trigger);VEM;Entries", 200, 0, 300);
     hVEMChargeToTD = new TH1D("hVEMChargeToTD", "VEM Charge (ToTD trigger);VEM;Entries", 200, 0, 300);
     hVEMChargeThreshold = new TH1D("hVEMChargeThreshold", "VEM Charge (SB trigger);VEM;Entries", 200, 0, 300);
     hVEMChargeOther = new TH1D("hVEMChargeOther", "VEM Charge (Other trigger);VEM;Entries", 200, 0, 300);
+    
+    // VEM charge per particle type
+    hVEMChargePhoton = new TH1D("hVEMChargePhoton", "VEM Charge (Photon primary);VEM;Entries", 200, 0, 300);
+    hVEMChargeProton = new TH1D("hVEMChargeProton", "VEM Charge (Proton primary);VEM;Entries", 200, 0, 300);
+    hVEMChargeIron = new TH1D("hVEMChargeIron", "VEM Charge (Iron primary);VEM;Entries", 200, 0, 300);
     
     // Charge vs distance per trigger type
     hChargeVsDistanceMOPS = new TH2D("hChargeVsDistanceMOPS", 
@@ -192,8 +220,10 @@ VModule::ResultFlag PMTTraceModule::Init()
     
     // Initialize trigger counters
     fTriggerCounts.clear();
+    fParticleTypeCounts.clear();
+    fTriggerCountsByParticle.clear();
     
-    // Create trace tree
+    // Create trace tree with particle type information and ML results
     fTraceTree = new TTree("TraceTree", "PMT Traces from CORSIKA");
     fTraceTree->Branch("eventId", &fEventId, "eventId/I");
     fTraceTree->Branch("stationId", &fStationId, "stationId/I");
@@ -205,6 +235,12 @@ VModule::ResultFlag PMTTraceModule::Init()
     fTraceTree->Branch("stationX", &fStationX, "stationX/D");
     fTraceTree->Branch("stationY", &fStationY, "stationY/D");
     fTraceTree->Branch("distance", &fDistance, "distance/D");
+    fTraceTree->Branch("primaryId", &fPrimaryId, "primaryId/I");
+    fTraceTree->Branch("primaryType", &fPrimaryType);
+    fTraceTree->Branch("isPhoton", &fIsPhoton, "isPhoton/O");
+    fTraceTree->Branch("mlPhotonScore", &fMLPhotonScore, "mlPhotonScore/D");
+    fTraceTree->Branch("mlIdentifiedAsPhoton", &fMLIdentifiedAsPhoton, "mlIdentifiedAsPhoton/O");
+    fTraceTree->Branch("mlPrediction", &fMLPrediction);
     fTraceTree->Branch("traceSize", &fTraceSize, "traceSize/I");
     fTraceTree->Branch("peakBin", &fPeakBin, "peakBin/I");
     fTraceTree->Branch("peakValue", &fPeakValue, "peakValue/D");
@@ -228,6 +264,68 @@ VModule::ResultFlag PMTTraceModule::Init()
     return eSuccess;
 }
 
+// Extract primary particle information
+void PMTTraceModule::ExtractPrimaryParticleInfo(const Event& event)
+{
+    // Reset to defaults
+    fPrimaryId = 0;
+    fPrimaryType = "Unknown";
+    fIsPhoton = false;
+    
+    if (event.HasSimShower()) {
+        const ShowerSimData& shower = event.GetSimShower();
+        fPrimaryId = shower.GetPrimaryParticle();
+        fPrimaryType = GetParticleTypeFromId(fPrimaryId);
+        fIsPhoton = (fPrimaryId == 22);  // PDG code for photon
+        
+        // Update particle type statistics
+        fParticleTypeCounts[fPrimaryType]++;
+        
+        // Fill particle type histogram
+        if (fPrimaryType == "photon") hParticleTypes->Fill(0);
+        else if (fPrimaryType == "electron") hParticleTypes->Fill(1);
+        else if (fPrimaryType == "proton") hParticleTypes->Fill(2);
+        else if (fPrimaryType == "iron") hParticleTypes->Fill(3);
+        else if (fPrimaryType == "muon") hParticleTypes->Fill(4);
+        else if (fPrimaryType == "nucleus") hParticleTypes->Fill(5);
+        else hParticleTypes->Fill(6);  // Unknown
+        
+        if (fEventCount <= 10) {
+            ostringstream msg;
+            msg << "Event " << fEventCount 
+                << " Primary: " << fPrimaryType 
+                << " (ID=" << fPrimaryId << ")"
+                << " IsPhoton: " << (fIsPhoton ? "YES" : "NO");
+            INFO(msg.str());
+        }
+    }
+}
+
+// Get particle type string from PDG ID
+string PMTTraceModule::GetParticleTypeFromId(int pdgId)
+{
+    switch(pdgId) {
+        case 22:
+            return "photon";
+        case 11:
+        case -11:
+            return "electron";
+        case 2212:
+            return "proton";
+        case 1000026056:
+            return "iron";
+        case 13:
+        case -13:
+            return "muon";
+        default:
+            if (pdgId > 1000000000) {
+                return "nucleus";
+            } else {
+                return "unknown";
+            }
+    }
+}
+
 // Run method
 VModule::ResultFlag PMTTraceModule::Run(Event& event)
 {
@@ -245,6 +343,9 @@ VModule::ResultFlag PMTTraceModule::Run(Event& event)
     fZenith = 0;
     fCoreX = 0;
     fCoreY = 0;
+    
+    // Extract primary particle information FIRST
+    ExtractPrimaryParticleInfo(event);
     
     if (event.HasSimShower()) {
         const ShowerSimData& shower = event.GetSimShower();
@@ -265,7 +366,9 @@ VModule::ResultFlag PMTTraceModule::Run(Event& event)
         
         if (fEventCount <= 5) {
             ostringstream debugMsg;
-            debugMsg << "Event " << fEventCount << " energy: " << fEnergy/1e18 << " EeV";
+            debugMsg << "Event " << fEventCount 
+                    << " energy: " << fEnergy/1e18 << " EeV"
+                    << " primary: " << fPrimaryType;
             INFO(debugMsg.str());
         }
         
@@ -280,7 +383,7 @@ VModule::ResultFlag PMTTraceModule::Run(Event& event)
     return eSuccess;
 }
 
-// ProcessStations method - Corrected based on T1RatesDFN.cc
+// ProcessStations method - no changes needed here
 void PMTTraceModule::ProcessStations(const Event& event)
 {
     const SEvent& sevent = event.GetSEvent();
@@ -322,17 +425,6 @@ void PMTTraceModule::ProcessStations(const Event& event)
             // Get the trigger bitmask
             trig_id = triggerData.GetPLDTrigger();
             
-            // Debug: Log raw trigger data for first few stations
-            if (fEventCount <= 5 && nStations <= 3) {
-                ostringstream debugMsg;
-                debugMsg << "Station " << fStationId << " trigger debug:"
-                        << " HasTriggerData=yes"
-                        << ", PLDTrigger=0x" << std::hex << trig_id << std::dec
-                        << ", IsT1=" << (triggerData.IsT1() ? "yes" : "no")
-                        << ", IsT2=" << (triggerData.IsT2() ? "yes" : "no");
-                INFO(debugMsg.str());
-            }
-            
             // Check trigger levels
             fIsT1 = triggerData.IsT1();
             fIsT2 = triggerData.IsT2();
@@ -343,39 +435,38 @@ void PMTTraceModule::ProcessStations(const Event& event)
             if (trig_id & COMPATIBILITY_SHWR_BUF_TRIG_SB) {
                 triggerTypes.push_back("SB");
                 fTriggerCounts["SB"]++;
+                fTriggerCountsByParticle[fPrimaryType]["SB"]++;
                 hTriggerTypes->Fill(0);
             }
             if (trig_id & COMPATIBILITY_SHWR_BUF_TRIG_TOTD) {
                 triggerTypes.push_back("ToTD");
                 fTriggerCounts["ToTD"]++;
+                fTriggerCountsByParticle[fPrimaryType]["ToTD"]++;
                 hTriggerTypes->Fill(1);
             }
             if (trig_id & COMPATIBILITY_SHWR_BUF_TRIG_MOPS) {
                 triggerTypes.push_back("MOPS");
                 fTriggerCounts["MOPS"]++;
+                fTriggerCountsByParticle[fPrimaryType]["MOPS"]++;
                 hTriggerTypes->Fill(2);
             }
             if (trig_id & COMPATIBILITY_SHWR_BUF_TRIG_TOT) {
                 triggerTypes.push_back("ToT");
                 fTriggerCounts["ToT"]++;
+                fTriggerCountsByParticle[fPrimaryType]["ToT"]++;
                 hTriggerTypes->Fill(3);
             }
             if (trig_id & SHWR_BUF_TRIG_EM) {
                 triggerTypes.push_back("EM");
                 fTriggerCounts["EM"]++;
+                fTriggerCountsByParticle[fPrimaryType]["EM"]++;
                 hTriggerTypes->Fill(4);
             }
             if (trig_id & SHWR_BUF_TRIG_DL) {
                 triggerTypes.push_back("DL");
                 fTriggerCounts["DL"]++;
+                fTriggerCountsByParticle[fPrimaryType]["DL"]++;
                 hTriggerTypes->Fill(5);
-            }
-            
-            // Also check the shifted bits for delayed triggers
-            const int shifted_trig = trig_id >> 8;
-            if ((shifted_trig & COMPATIBILITY_SHWR_BUF_TRIG_SB) && 
-                (std::find(triggerTypes.begin(), triggerTypes.end(), "SB") == triggerTypes.end())) {
-                triggerTypes.push_back("SB_delayed");
             }
             
             // Create combined trigger type string
@@ -393,29 +484,6 @@ void PMTTraceModule::ProcessStations(const Event& event)
                 hTriggerTypes->Fill(fIsT2 ? 7 : 6);
             }
             
-            // Check if any T1 trigger bits are set
-            int t1_bits = (COMPATIBILITY_SHWR_BUF_TRIG_SB |
-                          COMPATIBILITY_SHWR_BUF_TRIG_TOT |
-                          COMPATIBILITY_SHWR_BUF_TRIG_TOTD |
-                          COMPATIBILITY_SHWR_BUF_TRIG_MOPS |
-                          SHWR_BUF_TRIG_EM |
-                          SHWR_BUF_TRIG_DL);
-            
-            if (trig_id & t1_bits) {
-                hasValidTrigger = true;
-            }
-            
-            // Log trigger information for first few stations
-            if (hasValidTrigger && fTracesFound <= 10) {
-                ostringstream msg;
-                msg << "Station " << fStationId 
-                    << " - Trigger: 0x" << std::hex << trig_id << std::dec
-                    << " = " << fTriggerType
-                    << ", T1: " << (fIsT1 ? "yes" : "no")
-                    << ", T2: " << (fIsT2 ? "yes" : "no");
-                INFO(msg.str());
-            }
-            
             break;  // Process only first trigger time
         }
         
@@ -427,6 +495,29 @@ void PMTTraceModule::ProcessStations(const Event& event)
         }
         
         nStations++;
+        
+        // Get ML results from PhotonTriggerML if available
+        PhotonTriggerML::MLResult mlResult;
+        bool hasMLResults = PhotonTriggerML::GetMLResultForStation(fStationId, mlResult);
+        if (hasMLResults) {
+            fMLPhotonScore = mlResult.photonScore;
+            fMLIdentifiedAsPhoton = mlResult.identifiedAsPhoton;
+            fMLPrediction = mlResult.identifiedAsPhoton ? "ML-Photon" : "ML-Hadron";
+            
+            if (fTracesFound <= 10) {
+                ostringstream msg;
+                msg << "Station " << fStationId 
+                    << " has ML results: Score=" << fixed << setprecision(3) << fMLPhotonScore
+                    << ", Prediction=" << fMLPrediction
+                    << ", True=" << fPrimaryType;
+                INFO(msg.str());
+            }
+        } else {
+            // No ML results available for this station
+            fMLPhotonScore = -1;
+            fMLIdentifiedAsPhoton = false;
+            fMLPrediction = "No ML";
+        }
         
         // Get station position
         try {
@@ -449,7 +540,8 @@ void PMTTraceModule::ProcessStations(const Event& event)
             msg << "Station " << fStationId << " processed"
                 << ", Distance: " << fDistance << " m"
                 << ", Traces found: " << tracesThisStation
-                << ", Trigger: " << fTriggerType;
+                << ", Trigger: " << fTriggerType
+                << ", Primary: " << fPrimaryType;
             INFO(msg.str());
         }
     }
@@ -462,12 +554,13 @@ void PMTTraceModule::ProcessStations(const Event& event)
     if (fEventCount <= 10) {
         ostringstream msg;
         msg << "Event " << fEventCount << ": Processed " << nStations 
-            << " stations with sim data, found " << nTracesThisEvent << " traces";
+            << " stations with sim data, found " << nTracesThisEvent << " traces"
+            << " (Primary: " << fPrimaryType << ")";
         INFO(msg.str());
     }
 }
 
-// ProcessPMTs method
+// ProcessPMTs method - modified to include particle type in histogram titles
 int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
 {
     int tracesFound = 0;
@@ -535,11 +628,23 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                     InferTriggerType();
                 }
                 
-                // Create histogram with trigger type in title
+                // Create histogram with trigger type, particle type, AND ML results in title
                 if (fTracesFound < fMaxHistograms) {
                     TString histName = Form("traceHist_%d", fTracesFound);
-                    TString histTitle = Form("Event %d, Station %d, PMT %d [%s trigger]", 
-                                            fEventId, fStationId, fPmtId, fTriggerType.c_str());
+                    TString histTitle;
+                    
+                    if (fMLPhotonScore >= 0) {
+                        // Include ML results if available
+                        histTitle = Form("Event %d, Station %d, PMT %d [%s trigger] [%s primary] [ML: %.3f %s]", 
+                                        fEventId, fStationId, fPmtId, 
+                                        fTriggerType.c_str(), fPrimaryType.c_str(),
+                                        fMLPhotonScore, fMLPrediction.c_str());
+                    } else {
+                        // No ML results available
+                        histTitle = Form("Event %d, Station %d, PMT %d [%s trigger] [%s primary]", 
+                                        fEventId, fStationId, fPmtId, 
+                                        fTriggerType.c_str(), fPrimaryType.c_str());
+                    }
                     
                     TH1D* traceHist = new TH1D(histName, histTitle, 2048, 0, 2048);
                     traceHist->GetXaxis()->SetTitle("Time bin (25 ns)");
@@ -560,8 +665,11 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                 hTotalCharge->Fill(fTotalCharge);
                 hVEMCharge->Fill(fVEMCharge);
                 
-                // Fill trigger-specific histograms based on trigger type
+                // Fill trigger-specific histograms
                 FillTriggerSpecificHistograms();
+                
+                // Fill particle-specific histograms
+                FillParticleSpecificHistograms();
                 
                 if (fDistance > 0 && fVEMCharge > 0.1) {
                     hChargeVsDistance->Fill(fDistance, fVEMCharge);
@@ -580,9 +688,14 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                     msg << "Found FADC trace: Station " << fStationId 
                         << ", PMT " << fPmtId 
                         << ", Trigger: " << fTriggerType
+                        << ", Primary: " << fPrimaryType
                         << ", Peak: " << fPeakValue << " ADC at bin " << fPeakBin
                         << ", Total charge: " << fTotalCharge 
                         << ", VEM: " << fVEMCharge;
+                    if (fMLPhotonScore >= 0) {
+                        msg << ", ML Score: " << fixed << setprecision(3) << fMLPhotonScore
+                            << " (" << fMLPrediction << ")";
+                    }
                     INFO(msg.str());
                 }
                 
@@ -626,7 +739,7 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
     return tracesFound;
 }
 
-// ProcessTimeDistribution method
+// ProcessTimeDistribution method - modified to include particle type
 bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& timeDist)
 {
     // Extract trace data from TimeDistribution
@@ -675,11 +788,23 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
         InferTriggerType();
     }
     
-    // Create histogram with trigger type
+    // Create histogram with trigger type, particle type, AND ML results
     if (fTracesFound < fMaxHistograms) {
         TString histName = Form("traceHist_%d", fTracesFound);
-        TString histTitle = Form("Event %d, Station %d, PMT %d [%s trigger]", 
-                                fEventId, fStationId, fPmtId, fTriggerType.c_str());
+        TString histTitle;
+        
+        if (fMLPhotonScore >= 0) {
+            // Include ML results if available
+            histTitle = Form("Event %d, Station %d, PMT %d [%s trigger] [%s primary] [ML: %.3f %s]", 
+                            fEventId, fStationId, fPmtId, 
+                            fTriggerType.c_str(), fPrimaryType.c_str(),
+                            fMLPhotonScore, fMLPrediction.c_str());
+        } else {
+            // No ML results available
+            histTitle = Form("Event %d, Station %d, PMT %d [%s trigger] [%s primary]", 
+                            fEventId, fStationId, fPmtId, 
+                            fTriggerType.c_str(), fPrimaryType.c_str());
+        }
         
         TH1D* traceHist = new TH1D(histName, histTitle, 2048, 0, 2048);
         traceHist->GetXaxis()->SetTitle("Time bin (25 ns)");
@@ -703,6 +828,9 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
     // Fill trigger-specific histograms
     FillTriggerSpecificHistograms();
     
+    // Fill particle-specific histograms
+    FillParticleSpecificHistograms();
+    
     if (fDistance > 0 && fVEMCharge > 0.1) {
         hChargeVsDistance->Fill(fDistance, fVEMCharge);
     }
@@ -719,6 +847,7 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
         msg << "Found trace from TimeDistribution: Station " << fStationId 
             << ", PMT " << fPmtId 
             << ", Trigger: " << fTriggerType
+            << ", Primary: " << fPrimaryType
             << ", Peak: " << fPeakValue << " ADC at bin " << fPeakBin
             << ", Total charge: " << fTotalCharge 
             << ", VEM: " << fVEMCharge;
@@ -768,7 +897,8 @@ void PMTTraceModule::InferTriggerType()
             << ": " << fTriggerType
             << " (Peak=" << fPeakValue 
             << ", VEM=" << fVEMCharge
-            << ", BinsAbove1.75VEM=" << binsAbove1_75VEM << ")";
+            << ", BinsAbove1.75VEM=" << binsAbove1_75VEM
+            << ", Primary=" << fPrimaryType << ")";
         INFO(msg.str());
     }
 }
@@ -802,6 +932,18 @@ void PMTTraceModule::FillTriggerSpecificHistograms()
     }
 }
 
+// Fill particle-specific histograms
+void PMTTraceModule::FillParticleSpecificHistograms()
+{
+    if (fPrimaryType == "photon") {
+        hVEMChargePhoton->Fill(fVEMCharge);
+    } else if (fPrimaryType == "proton") {
+        hVEMChargeProton->Fill(fVEMCharge);
+    } else if (fPrimaryType == "iron") {
+        hVEMChargeIron->Fill(fVEMCharge);
+    }
+}
+
 // SaveAndDisplayTraces method
 void PMTTraceModule::SaveAndDisplayTraces()
 {
@@ -818,6 +960,28 @@ void PMTTraceModule::SaveAndDisplayTraces()
         INFO(triggerMsg.str());
     }
     INFO("=============================");
+    
+    // Print particle type summary
+    INFO("=== Particle Type Summary ===");
+    for (map<string, int>::const_iterator it = fParticleTypeCounts.begin();
+         it != fParticleTypeCounts.end(); ++it) {
+        ostringstream particleMsg;
+        particleMsg << "  " << it->first << ": " << it->second << " events";
+        INFO(particleMsg.str());
+    }
+    INFO("=============================");
+    
+    // Print trigger counts by particle type
+    INFO("=== Triggers by Particle Type ===");
+    for (const auto& particleEntry : fTriggerCountsByParticle) {
+        INFO("  " + particleEntry.first + ":");
+        for (const auto& triggerEntry : particleEntry.second) {
+            ostringstream msg;
+            msg << "    " << triggerEntry.first << ": " << triggerEntry.second;
+            INFO(msg.str());
+        }
+    }
+    INFO("==================================");
     
     // First save all data to file
     if (fOutputFile) {
@@ -924,8 +1088,7 @@ void PMTTraceModule::SaveAndDisplayTraces()
         hChargeVsDistanceMOPS->Draw("colz");
         
         c2->cd(4);
-        gPad->SetLogz();
-        hChargeVsDistanceToTD->Draw("colz");
+        hParticleTypes->Draw();
         
         c2->Update();
         c2->SaveAs("trigger_analysis.png");
@@ -973,6 +1136,16 @@ VModule::ResultFlag PMTTraceModule::Finish()
         INFO(triggerMsg.str());
     }
     INFO("===================================");
+    
+    // Print final particle type summary
+    INFO("=== Final Particle Type Summary ===");
+    for (map<string, int>::const_iterator it = fParticleTypeCounts.begin();
+         it != fParticleTypeCounts.end(); ++it) {
+        ostringstream particleMsg;
+        particleMsg << "  " << it->first << ": " << it->second << " events";
+        INFO(particleMsg.str());
+    }
+    INFO("====================================");
     
     if (fOutputFile) {
         fOutputFile->cd();

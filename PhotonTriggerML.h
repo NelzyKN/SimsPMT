@@ -28,6 +28,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <fstream>  // Added for log file
 
 // Forward declarations
 class TFile;
@@ -104,13 +105,20 @@ public:
      */
     void SaveAndDisplaySummary();
     
-private:
+    /**
+     * \brief Get primary particle type for external access
+     * 
+     * Used by PMTTraceModule to include particle type in histograms
+     */
+    std::string GetPrimaryType() const { return fPrimaryType; }
+    int GetPrimaryId() const { return fPrimaryId; }
+    
     /**
      * \struct Features
      * \brief Container for extracted FADC trace features
      * 
      * These features are used by the ML algorithm to discriminate
-     * between photon and hadronic showers.
+     * between photon and hadronic showers. Made public for MLResult struct.
      */
     struct Features {
         double risetime;           ///< Rise time from 10% to 90% of peak [ns]
@@ -122,6 +130,42 @@ private:
         double total_charge;      ///< Total integrated charge [VEM]
         double peak_amplitude;    ///< Peak amplitude [VEM]
     };
+    
+    /**
+     * \struct MLResult
+     * \brief Container for ML analysis results per station
+     */
+    struct MLResult {
+        double photonScore;      ///< ML photon probability score (0-1)
+        bool identifiedAsPhoton; ///< True if score > threshold
+        bool isActualPhoton;     ///< True if primary is photon
+        double vemCharge;        ///< Total VEM charge
+        Features features;       ///< Extracted features
+        std::string primaryType; ///< Primary particle type
+        
+        MLResult() : photonScore(0), identifiedAsPhoton(false), 
+                    isActualPhoton(false), vemCharge(0), primaryType("Unknown") {}
+    };
+    
+    /**
+     * \brief Get ML results for a specific station
+     * 
+     * Used by PMTTraceModule to access ML analysis results
+     * 
+     * \param stationId The station ID to query
+     * \param result Output parameter filled with ML results
+     * \return True if results exist for this station
+     */
+    static bool GetMLResultForStation(int stationId, MLResult& result);
+    
+    /**
+     * \brief Clear all stored ML results
+     * 
+     * Called at the beginning of each event
+     */
+    static void ClearMLResults();
+    
+private:
     
     /**
      * \brief Extract features from FADC trace
@@ -161,6 +205,14 @@ private:
      */
     void ProcessStation(const sevt::Station& station);
     
+    /**
+     * \brief Write ML analysis to log file
+     * 
+     * Writes detailed ML analysis results, confusion matrix,
+     * and performance metrics to the log file.
+     */
+    void WriteMLAnalysisToLog();
+    
     // ===== Event and Station Counters =====
     int fEventCount;          ///< Total number of events processed
     int fStationCount;        ///< Total number of stations with valid traces
@@ -185,6 +237,10 @@ private:
     TFile* fOutputFile;       ///< Output ROOT file
     TTree* fMLTree;          ///< Tree containing ML analysis results
     
+    // ===== Log File =====
+    std::string fLogFileName; ///< Name of the log file
+    std::ofstream fLogFile;   ///< Log file for ML analysis results
+    
     // ===== Analysis Histograms =====
     
     // 1D Histograms
@@ -207,7 +263,7 @@ private:
     int fTruePositives;      ///< Photon correctly identified as photon
     int fFalsePositives;     ///< Hadron incorrectly identified as photon
     int fTrueNegatives;      ///< Hadron correctly identified as hadron
-    int fFalseNegatives;     ///< Photon incorrectly identified as photon
+    int fFalseNegatives;     ///< Photon incorrectly identified as hadron
     
     // ===== Trigger Configuration =====
     double fPhotonThreshold;  ///< Threshold for photon classification (default 0.5)
@@ -217,6 +273,13 @@ private:
     
     // ===== Trigger Type Analysis =====
     std::map<std::string, int> fTriggerCounts; ///< Count of stations by trigger type
+    
+    // ===== Particle Type Statistics =====
+    std::map<std::string, int> fParticleTypeCounts; ///< Count of events by particle type
+    std::map<std::string, int> fParticleTypePhotonLike; ///< Photon-like counts by particle type
+    
+    // ===== Static ML Results Storage =====
+    static std::map<int, MLResult> fMLResultsMap; ///< ML results by station ID for inter-module communication
     
     /**
      * \brief Register module with framework

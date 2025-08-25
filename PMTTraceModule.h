@@ -7,7 +7,7 @@
  * 
  * This module reads CORSIKA shower data and extracts FADC traces
  * from PMT simulation data. The traces are saved to a ROOT file
- * for further analysis.
+ * for further analysis. Now includes primary particle type in histogram titles.
  */
 
 #include <fwk/VModule.h>
@@ -63,6 +63,16 @@ private:
     double fStationY;
     double fDistance;
     
+    // Primary particle information
+    int fPrimaryId;
+    std::string fPrimaryType;
+    bool fIsPhoton;
+    
+    // ML Analysis results from PhotonTriggerML
+    double fMLPhotonScore;
+    bool fMLIdentifiedAsPhoton;
+    std::string fMLPrediction;
+    
     // Trace data
     std::vector<double> fTraceData;
     int fTraceSize;
@@ -77,6 +87,10 @@ private:
     bool fIsT1;
     bool fIsT2;
     std::map<std::string, int> fTriggerCounts;
+    
+    // Particle type statistics
+    std::map<std::string, int> fParticleTypeCounts;
+    std::map<std::string, std::map<std::string, int>> fTriggerCountsByParticle;
     
     // Output file and tree
     TFile* fOutputFile;
@@ -102,6 +116,12 @@ private:
     TH2D* hChargeVsDistanceMOPS;
     TH2D* hChargeVsDistanceToTD;
     
+    // Particle type histograms
+    TH1D* hParticleTypes;
+    TH1D* hVEMChargePhoton;
+    TH1D* hVEMChargeProton;
+    TH1D* hVEMChargeIron;
+    
     // Trace histogram storage
     TObjArray* fTraceHistograms;
     int fMaxHistograms;
@@ -110,6 +130,26 @@ private:
     void ProcessStations(const evt::Event& event);
     int ProcessPMTs(const sevt::Station& station);
     bool ProcessTimeDistribution(const utl::TimeDistribution<int>& timeDist);
+    
+    /**
+     * \brief Extract primary particle information from event
+     * 
+     * Determines the primary particle type from the shower simulation data
+     * and sets fPrimaryId, fPrimaryType, and fIsPhoton accordingly.
+     * 
+     * \param event The current event being processed
+     */
+    void ExtractPrimaryParticleInfo(const evt::Event& event);
+    
+    /**
+     * \brief Get particle type string from PDG ID
+     * 
+     * Converts PDG particle ID to human-readable string
+     * 
+     * \param pdgId The PDG particle ID
+     * \return String representation of particle type
+     */
+    std::string GetParticleTypeFromId(int pdgId);
     
     /**
      * \brief Infer trigger type from signal characteristics
@@ -127,6 +167,13 @@ private:
      * the current trigger type. Handles multiple trigger types if present.
      */
     void FillTriggerSpecificHistograms();
+    
+    /**
+     * \brief Fill particle-type-specific histograms
+     * 
+     * Fills histograms based on the primary particle type
+     */
+    void FillParticleSpecificHistograms();
     
     // Register module with framework
     REGISTER_MODULE("PMTTraceModule", PMTTraceModule);
