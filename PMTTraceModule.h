@@ -5,12 +5,13 @@
  * \file PMTTraceModule.h
  * \brief Module to extract PMT traces from CORSIKA shower simulations
  * 
- * Enhanced version that identifies and stores trigger types (MOPS, ToTD, etc.)
- * for each signal, providing detailed trigger analysis capabilities.
+ * This module reads CORSIKA shower data and extracts FADC traces
+ * from PMT simulation data. The traces are saved to a ROOT file
+ * for further analysis.
  */
 
 #include <fwk/VModule.h>
-#include <utl/TimeDistribution.h>
+#include <utl/TimeDistribution.h>  // Include full definition
 #include <string>
 #include <vector>
 #include <map>
@@ -25,6 +26,7 @@ namespace evt { class Event; }
 namespace sevt { 
     class Station; 
     class PMT;
+    // TraceI is defined in PMT headers
 }
 
 class PMTTraceModule : public fwk::VModule {
@@ -61,13 +63,6 @@ private:
     double fStationY;
     double fDistance;
     
-    // Trigger information
-    std::string fTriggerType;        // MOPS, ToTD, Threshold, etc.
-    std::string fTriggerAlgorithm;   // Full algorithm name
-    bool fIsT1;                       // T1 trigger flag
-    bool fIsT2;                       // T2 trigger flag
-    std::map<std::string, int> fTriggerCounts;  // Counter for each trigger type
-    
     // Trace data
     std::vector<double> fTraceData;
     int fTraceSize;
@@ -76,11 +71,18 @@ private:
     double fTotalCharge;
     double fVEMCharge;
     
+    // Trigger information
+    std::string fTriggerType;
+    std::string fTriggerAlgorithm;
+    bool fIsT1;
+    bool fIsT2;
+    std::map<std::string, int> fTriggerCounts;
+    
     // Output file and tree
     TFile* fOutputFile;
     TTree* fTraceTree;
     
-    // General histograms
+    // Histograms
     TH1D* hEventEnergy;
     TH1D* hZenithAngle;
     TH1D* hNStations;
@@ -91,14 +93,14 @@ private:
     TH1D* hVEMCharge;
     TH2D* hChargeVsDistance;
     
-    // Trigger-specific histograms
-    TH1D* hTriggerTypes;              // Summary of trigger types
-    TH1D* hVEMChargeMOPS;            // VEM charge for MOPS triggers
-    TH1D* hVEMChargeToTD;            // VEM charge for ToTD triggers
-    TH1D* hVEMChargeThreshold;       // VEM charge for Threshold triggers
-    TH1D* hVEMChargeOther;           // VEM charge for other triggers
-    TH2D* hChargeVsDistanceMOPS;     // Charge vs distance for MOPS
-    TH2D* hChargeVsDistanceToTD;     // Charge vs distance for ToTD
+    // Trigger type specific histograms
+    TH1D* hTriggerTypes;
+    TH1D* hVEMChargeMOPS;
+    TH1D* hVEMChargeToTD;
+    TH1D* hVEMChargeThreshold;
+    TH1D* hVEMChargeOther;
+    TH2D* hChargeVsDistanceMOPS;
+    TH2D* hChargeVsDistanceToTD;
     
     // Trace histogram storage
     TObjArray* fTraceHistograms;
@@ -108,6 +110,23 @@ private:
     void ProcessStations(const evt::Event& event);
     int ProcessPMTs(const sevt::Station& station);
     bool ProcessTimeDistribution(const utl::TimeDistribution<int>& timeDist);
+    
+    /**
+     * \brief Infer trigger type from signal characteristics
+     * 
+     * When trigger data is not explicitly available, this method
+     * analyzes the FADC trace to infer the most likely trigger type
+     * based on signal characteristics like peak height, duration, etc.
+     */
+    void InferTriggerType();
+    
+    /**
+     * \brief Fill trigger-specific histograms
+     * 
+     * Fills the appropriate trigger-type-specific histograms based on
+     * the current trigger type. Handles multiple trigger types if present.
+     */
+    void FillTriggerSpecificHistograms();
     
     // Register module with framework
     REGISTER_MODULE("PMTTraceModule", PMTTraceModule);

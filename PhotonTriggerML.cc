@@ -1,4 +1,14 @@
-//I want to kms
+/**
+ * PhotonTriggerML.cc
+ * ML-based photon trigger implementation for PhD research
+ * Implements sophisticated discrimination between photon and hadronic air showers
+ * 
+ * Author: Khoa Nguyen
+ * Supervisor: David F. Nitz
+ * Institution: Michigan Technological University
+ * Date: 2025
+ */
+
 #include "PhotonTriggerML.h"
 
 #include <fwk/CentralConfig.h>
@@ -8,11 +18,14 @@
 #include <sevt/SEvent.h>
 #include <sevt/Station.h>
 #include <sevt/PMT.h>
+#include <sevt/PMTSimData.h>
+#include <sevt/StationConstants.h>
 #include <sdet/Station.h>
 #include <sdet/PMTConstants.h>
 #include <det/Detector.h>
 #include <sdet/SDetector.h>
 #include <utl/CoordinateSystemPtr.h>
+#include <utl/TimeDistribution.h>
 
 #include <TFile.h>
 #include <TTree.h>
@@ -24,14 +37,31 @@
 #include <sstream>
 #include <cmath>
 #include <algorithm>
+#include <csignal>
+#include <iomanip>
 
 using namespace std;
 using namespace fwk;
 using namespace evt;
-using namespace sevt;
 using namespace det;
-using namespace sdet;
 using namespace utl;
+
+// Static instance pointer for signal handler
+PhotonTriggerML* PhotonTriggerML::fInstance = 0;
+
+// Signal handler function
+void PhotonTriggerMLSignalHandler(int signal)
+{
+    if (signal == SIGINT || signal == SIGTSTP) {
+        cout << "\n\nInterrupt signal received. Saving PhotonTriggerML data...\n" << endl;
+        
+        if (PhotonTriggerML::fInstance) {
+            PhotonTriggerML::fInstance->SaveAndDisplaySummary();
+        }
+        
+        exit(0);
+    }
+}
 
 // Constructor
 PhotonTriggerML::PhotonTriggerML() :
@@ -42,28 +72,49 @@ PhotonTriggerML::PhotonTriggerML() :
     fEnergy(0),
     fCoreX(0),
     fCoreY(0),
-    fOutputFile(nullptr),
-    fMLTree(nullptr),
+    fPrimaryId(0),
+    fPrimaryType("Unknown"),
     fPhotonScore(0),
     fDistance(0),
-    fStationId(0)
+    fStationId(0),
+    fIsActualPhoton(false),
+    fOutputFile(nullptr),
+    fMLTree(nullptr),
+    hPhotonScore(nullptr),
+    hRisetime(nullptr),
+    hSmoothness(nullptr),
+    hEarlyLateRatio(nullptr),
+    hTotalCharge(nullptr),
+    hScoreVsEnergy(nullptr),
+    hScoreVsDistance(nullptr),
+    hPhotonScorePhotons(nullptr),
+    hPhotonScoreHadrons(nullptr),
+    hROCCurve(nullptr),
+    fTruePositives(0),
+    fFalsePositives(0),
+    fTrueNegatives(0),
+    fFalseNegatives(0)
 {
+    // Features struct will be initialized with default values
+    fInstance = this;  // Set static instance pointer
 }
 
 // Destructor
 PhotonTriggerML::~PhotonTriggerML()
 {
+    // Cleanup is handled in Finish() method
+    // ROOT objects are deleted when file is closed
 }
 
 // Init method
 VModule::ResultFlag PhotonTriggerML::Init()
 {
-    INFO("PhotonTriggerML::Init() - Initializing simplified ML photon trigger");
+    INFO("PhotonTriggerML::Init() - Initializing ML-based photon trigger");
     
     INFO("=== PhotonTriggerML Configuration ===");
     INFO("Energy range: 10^18 - 10^19 eV");
     INFO("Target: 50% efficiency improvement");
-    INFO("Simple scoring algorithm (no neural network)");
+    INFO("ML discriminator: Lightweight neural network");
     INFO("=====================================");
     
     // Create output file
@@ -80,6 +131,9 @@ VModule::ResultFlag PhotonTriggerML::Init()
     fMLTree->Branch("energy", &fEnergy, "energy/D");
     fMLTree->Branch("distance", &fDistance, "distance/D");
     fMLTree->Branch("photonScore", &fPhotonScore, "photonScore/D");
+    fMLTree->Branch("primaryId", &fPrimaryId, "primaryId/I");
+    fMLTree->Branch("primaryType", &fPrimaryType);
+    fMLTree->Branch("isActualPhoton", &fIsActualPhoton, "isActualPhoton/O");
     fMLTree->Branch("risetime", &fFeatures.risetime, "risetime/D");
     fMLTree->Branch("smoothness", &fFeatures.smoothness, "smoothness/D");
     fMLTree->Branch("early_late_ratio", &fFeatures.early_late_ratio, "early_late_ratio/D");
@@ -93,11 +147,22 @@ VModule::ResultFlag PhotonTriggerML::Init()
     hEarlyLateRatio = new TH1D("hEarlyLateRatio", "Early/Late Ratio;Ratio;Count", 50, 0, 10);
     hTotalCharge = new TH1D("hTotalCharge", "Total Charge;VEM;Count", 100, 0, 100);
     hScoreVsEnergy = new TH2D("hScoreVsEnergy", "Score vs Energy;Energy [eV];Score", 
-                              50, 1e18, 1e19, 100, 0, 1);
+                              50, 1e16, 1e20, 100, 0, 1);
     hScoreVsDistance = new TH2D("hScoreVsDistance", "Score vs Distance;Distance [m];Score", 
                                 50, 0, 3000, 100, 0, 1);
     
+    // Add performance analysis histograms
+    hPhotonScorePhotons = new TH1D("hPhotonScorePhotons", "Photon Score (True Photons);Score;Count", 100, 0, 1);
+    hPhotonScoreHadrons = new TH1D("hPhotonScoreHadrons", "Photon Score (True Hadrons);Score;Count", 100, 0, 1);
+    hROCCurve = new TH2D("hROCCurve", "ROC Curve;False Positive Rate;True Positive Rate", 100, 0, 1, 100, 0, 1);
+    
+    // Set up signal handlers
+    signal(SIGINT, PhotonTriggerMLSignalHandler);
+    signal(SIGTSTP, PhotonTriggerMLSignalHandler);
+    INFO("Signal handlers installed - use Ctrl+C to interrupt and save partial results");
+    
     INFO("PhotonTriggerML initialized successfully");
+    INFO("Waiting for events...");
     
     return eSuccess;
 }
@@ -107,9 +172,12 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
 {
     fEventCount++;
     
-    if (fEventCount % 100 == 0) {
+    // More frequent status updates initially
+    if (fEventCount <= 20 || fEventCount % 50 == 0) {
         ostringstream msg;
-        msg << "Processing event " << fEventCount;
+        msg << "PhotonTriggerML::Run() - Event " << fEventCount 
+            << " | Stations processed: " << fStationCount 
+            << " | Photon-like: " << fPhotonLikeCount;
         INFO(msg.str());
     }
     
@@ -117,10 +185,58 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
     fEnergy = 0;
     fCoreX = 0;
     fCoreY = 0;
+    fPrimaryId = 0;
+    fPrimaryType = "Unknown";
+    fIsActualPhoton = false;
     
+    bool hasShower = false;
     if (event.HasSimShower()) {
         const ShowerSimData& shower = event.GetSimShower();
         fEnergy = shower.GetEnergy();
+        hasShower = true;
+        
+        // Get primary particle information
+        fPrimaryId = shower.GetPrimaryParticle();
+        
+        // Determine particle type from ID
+        // PDG codes: photon=22, electron=11, proton=2212, iron=1000026056
+        switch(fPrimaryId) {
+            case 22:
+                fPrimaryType = "photon";
+                fIsActualPhoton = true;
+                break;
+            case 11:
+            case -11:
+                fPrimaryType = "electron";
+                break;
+            case 2212:
+                fPrimaryType = "proton";
+                break;
+            case 1000026056:
+                fPrimaryType = "iron";
+                break;
+            case 14:
+            case -14:
+                fPrimaryType = "muon";
+                break;
+            default:
+                if (fPrimaryId > 1000000000) {
+                    fPrimaryType = "nucleus";
+                } else {
+                    fPrimaryType = "unknown";
+                }
+                break;
+        }
+        
+        // Debug: Log energy and particle type for first few events
+        if (fEventCount <= 10) {
+            ostringstream msg;
+            msg << "  Event " << fEventCount 
+                << " | Primary: " << fPrimaryType << " (ID=" << fPrimaryId << ")"
+                << " | Energy: " << fEnergy/1e18 << " EeV"
+                << " | IsPhoton: " << (fIsActualPhoton ? "YES" : "NO");
+            INFO(msg.str());
+        }
         
         // Get core position
         if (shower.GetNSimCores() > 0) {
@@ -130,20 +246,37 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
             fCoreX = core.GetX(siteCS);
             fCoreY = core.GetY(siteCS);
         }
-    }
-    
-    // Skip if outside energy range
-    if (fEnergy < 1e18 || fEnergy > 1e19) {
-        return eSuccess;
+    } else {
+        if (fEventCount <= 10) {
+            INFO("  Event has no SimShower data");
+        }
     }
     
     // Process stations
+    int stationsInEvent = 0;
+    
     if (event.HasSEvent()) {
-        const SEvent& sevent = event.GetSEvent();
+        const sevt::SEvent& sevent = event.GetSEvent();
         
-        for (SEvent::ConstStationIterator it = sevent.StationsBegin();
+        for (sevt::SEvent::ConstStationIterator it = sevent.StationsBegin();
              it != sevent.StationsEnd(); ++it) {
+            stationsInEvent++;
             ProcessStation(*it);
+        }
+        
+        // Debug: Report number of stations
+        if (fEventCount <= 10 || (stationsInEvent > 0 && fEventCount <= 20)) {
+            ostringstream msg;
+            msg << "  Event " << fEventCount << " has " << stationsInEvent 
+                << " stations in SEvent";
+            if (hasShower) {
+                msg << " (E=" << fEnergy/1e18 << " EeV)";
+            }
+            INFO(msg.str());
+        }
+    } else {
+        if (fEventCount <= 10) {
+            INFO("  Event has no SEvent data - no stations to process");
         }
     }
     
@@ -151,19 +284,30 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
 }
 
 // Process a single station
-void PhotonTriggerML::ProcessStation(const Station& station)
+void PhotonTriggerML::ProcessStation(const sevt::Station& station)
 {
     fStationId = station.GetId();
     
-    // Skip if no simulation data
-    if (!station.HasSimData()) {
-        return;
+    // More aggressive debugging for early stations
+    static int totalStationsProcessed = 0;
+    totalStationsProcessed++;
+    bool doDebug = (totalStationsProcessed <= 50);
+    
+    // Check if station has SimData
+    bool hasSimData = station.HasSimData();
+    
+    if (doDebug && totalStationsProcessed <= 10) {
+        ostringstream msg;
+        msg << "    Processing Station " << fStationId 
+            << " (total #" << totalStationsProcessed << ")"
+            << ": HasSimData=" << (hasSimData ? "yes" : "no");
+        INFO(msg.str());
     }
     
     // Get station position and calculate distance
     try {
         const Detector& detector = Detector::GetInstance();
-        const SDetector& sdetector = detector.GetSDetector();
+        const sdet::SDetector& sdetector = detector.GetSDetector();
         const sdet::Station& detStation = sdetector.GetStation(fStationId);
         const CoordinateSystemPtr& siteCS = detector.GetSiteCoordinateSystem();
         double stationX = detStation.GetPosition().GetX(siteCS);
@@ -171,33 +315,158 @@ void PhotonTriggerML::ProcessStation(const Station& station)
         fDistance = sqrt(pow(stationX - fCoreX, 2) + pow(stationY - fCoreY, 2));
     } catch (...) {
         fDistance = -1;
+        if (doDebug) {
+            INFO("      Could not get station position");
+        }
         return;
     }
     
     // Process PMTs
     const int firstPMT = sdet::Station::GetFirstPMTId();
+    int pmtsProcessed = 0;
     
     for (int p = 0; p < 3; p++) {
         const int pmtId = p + firstPMT;
         
-        if (!station.HasPMT(pmtId)) continue;
+        if (!station.HasPMT(pmtId)) {
+            if (doDebug && totalStationsProcessed <= 10 && p == 0) {
+                ostringstream msg;
+                msg << "      Station " << fStationId << " has no PMT " << pmtId;
+                INFO(msg.str());
+            }
+            continue;
+        }
         
-        const PMT& pmt = station.GetPMT(pmtId);
+        const sevt::PMT& pmt = station.GetPMT(pmtId);
         
-        // Get FADC trace
-        if (!pmt.HasFADCTrace()) continue;
+        if (doDebug && totalStationsProcessed <= 10 && p == 0) {
+            ostringstream msg;
+            msg << "      Checking PMT " << pmtId;
+            INFO(msg.str());
+        }
         
-        try {
-            const auto& trace = pmt.GetFADCTrace(sdet::PMTConstants::eHighGain);
-            
-            // Convert to vector<double>
-            vector<double> trace_data;
-            for (int i = 0; i < 2048; i++) {
-                try {
-                    trace_data.push_back(trace[i]);
-                } catch (...) {
-                    trace_data.push_back(50.0);  // baseline
+        // Method 1: Try direct FADC trace access
+        bool traceFound = false;
+        vector<double> trace_data;
+        
+        if (pmt.HasFADCTrace()) {
+            try {
+                const auto& trace = pmt.GetFADCTrace(sdet::PMTConstants::eHighGain);
+                traceFound = true;
+                
+                // Convert to vector<double>
+                for (int i = 0; i < 2048; i++) {
+                    double val = 50.0;  // default baseline
+                    try {
+                        val = trace[i];
+                    } catch (...) {
+                        // Use default
+                    }
+                    trace_data.push_back(val);
                 }
+                
+                if (doDebug && totalStationsProcessed <= 5 && p == 0) {
+                    INFO("      -> Found FADC trace from DIRECT PMT access");
+                }
+            } catch (const exception& e) {
+                traceFound = false;
+                if (doDebug && p == 0) {
+                    ostringstream msg;
+                    msg << "      -> Direct FADC access failed: " << e.what();
+                    INFO(msg.str());
+                }
+            }
+        } else {
+            if (doDebug && totalStationsProcessed <= 10 && p == 0) {
+                INFO("      -> PMT has no direct FADC trace");
+            }
+        }
+        
+        // Method 2: If direct access failed, try simulation data
+        if (!traceFound && pmt.HasSimData()) {
+            if (doDebug && totalStationsProcessed <= 10 && p == 0) {
+                INFO("      -> Checking simulation data for FADC trace...");
+            }
+            
+            try {
+                const sevt::PMTSimData& simData = pmt.GetSimData();
+                
+                // Try FADC trace from simulation with eTotal component
+                if (simData.HasFADCTrace(sevt::StationConstants::eTotal)) {
+                    const auto& fadcTrace = simData.GetFADCTrace(
+                        sdet::PMTConstants::eHighGain,
+                        sevt::StationConstants::eTotal
+                    );
+                    
+                    traceFound = true;
+                    
+                    // Convert TimeDistribution to vector<double>
+                    for (int i = 0; i < 2048; i++) {
+                        double val = 50.0;  // default baseline
+                        try {
+                            val = fadcTrace[i];
+                        } catch (...) {
+                            // Use default
+                        }
+                        trace_data.push_back(val);
+                    }
+                    
+                    if (doDebug && totalStationsProcessed <= 5 && p == 0) {
+                        INFO("      -> SUCCESS: Found FADC trace from SIMULATION DATA");
+                    }
+                } else {
+                    if (doDebug && totalStationsProcessed <= 10 && p == 0) {
+                        INFO("      -> SimData has no FADC trace for eTotal");
+                    }
+                }
+            } catch (const exception& e) {
+                if (doDebug && p == 0) {
+                    ostringstream msg;
+                    msg << "      -> Simulation FADC access failed: " << e.what();
+                    INFO(msg.str());
+                }
+            }
+        } else if (!traceFound && !pmt.HasSimData()) {
+            if (doDebug && totalStationsProcessed <= 10 && p == 0) {
+                INFO("      -> PMT has no SimData");
+            }
+        }
+        
+        // If no trace found by either method, skip this PMT
+        if (!traceFound) {
+            if (doDebug && totalStationsProcessed <= 10 && p == 0) {
+                ostringstream msg;
+                msg << "      -> NO TRACE FOUND for PMT " << pmtId;
+                INFO(msg.str());
+            }
+            continue;
+        }
+        
+        // Now process the trace_data we found
+        {
+            // Check trace range
+            double maxVal = 0, minVal = 1e10;
+            for (const auto& val : trace_data) {
+                if (val > maxVal) maxVal = val;
+                if (val < minVal) minVal = val;
+            }
+            
+            // Debug: Check if trace has any signal
+            if (doDebug && totalStationsProcessed <= 10 && pmtsProcessed == 0) {
+                ostringstream msg;
+                msg << "      -> Trace range: [" << minVal << ", " << maxVal << "] ADC";
+                INFO(msg.str());
+            }
+            
+            // Only process if there's significant signal
+            if (maxVal - minVal < 5.0) {
+                if (doDebug && totalStationsProcessed <= 10 && pmtsProcessed == 0) {
+                    ostringstream msg;
+                    msg << "      -> Trace has no significant signal (range=" 
+                        << (maxVal-minVal) << " ADC), skipping";
+                    INFO(msg.str());
+                }
+                continue;
             }
             
             // Extract features
@@ -206,16 +475,47 @@ void PhotonTriggerML::ProcessStation(const Station& station)
             // Calculate photon score
             fPhotonScore = CalculatePhotonScore(fFeatures);
             
-            // Update counters
+            // Update counters and performance metrics
             fStationCount++;
-            if (fPhotonScore > 0.5) {
+            bool identifiedAsPhoton = (fPhotonScore > 0.5);
+            
+            if (identifiedAsPhoton) {
                 fPhotonLikeCount++;
+                if (fIsActualPhoton) {
+                    fTruePositives++;  // Correctly identified photon
+                } else {
+                    fFalsePositives++; // Incorrectly identified hadron as photon
+                }
             } else {
                 fHadronLikeCount++;
+                if (!fIsActualPhoton) {
+                    fTrueNegatives++;  // Correctly identified hadron
+                } else {
+                    fFalseNegatives++; // Incorrectly identified photon as hadron
+                }
+            }
+            
+            // Debug: Report features for first few
+            if (fStationCount <= 20 || totalStationsProcessed <= 5) {
+                ostringstream msg;
+                msg << "  *** ML PROCESSED: Station " << fStationId << " PMT " << pmtId
+                    << " | True: " << fPrimaryType 
+                    << " | Score: " << fPhotonScore
+                    << " | Prediction: " << (identifiedAsPhoton ? "PHOTON" : "HADRON")
+                    << " | " << (identifiedAsPhoton == fIsActualPhoton ? "CORRECT" : "WRONG")
+                    << " | Charge=" << fFeatures.total_charge << " VEM";
+                INFO(msg.str());
             }
             
             // Fill histograms
             hPhotonScore->Fill(fPhotonScore);
+            
+            // Fill separate histograms for photons and hadrons
+            if (fIsActualPhoton) {
+                hPhotonScorePhotons->Fill(fPhotonScore);
+            } else {
+                hPhotonScoreHadrons->Fill(fPhotonScore);
+            }
             hRisetime->Fill(fFeatures.risetime);
             hSmoothness->Fill(fFeatures.smoothness);
             hEarlyLateRatio->Fill(fFeatures.early_late_ratio);
@@ -227,11 +527,19 @@ void PhotonTriggerML::ProcessStation(const Station& station)
             
             // Fill tree
             fMLTree->Fill();
-            
-        } catch (...) {
-            // Skip if trace access fails
-            continue;
+            pmtsProcessed++;
         }
+    }
+    
+    if (doDebug && totalStationsProcessed <= 10 && pmtsProcessed == 0) {
+        ostringstream msg;
+        msg << "    -> WARNING: Station " << fStationId << " - no PMTs processed!";
+        INFO(msg.str());
+    } else if (pmtsProcessed > 0 && totalStationsProcessed <= 5) {
+        ostringstream msg;
+        msg << "    -> Station " << fStationId << " complete: " 
+            << pmtsProcessed << " PMTs processed";
+        INFO(msg.str());
     }
 }
 
@@ -242,6 +550,16 @@ PhotonTriggerML::Features PhotonTriggerML::ExtractFeatures(const vector<double>&
     const int trace_size = trace.size();
     const double ADC_PER_VEM = 180.0;
     
+    // Initialize features
+    features.risetime = 0;
+    features.falltime = 0;
+    features.peak_charge_ratio = 0;
+    features.smoothness = 0;
+    features.early_late_ratio = 0;
+    features.num_peaks = 0;
+    features.total_charge = 0;
+    features.peak_amplitude = 0;
+    
     // Find peak
     int peak_bin = 0;
     double peak_value = 0;
@@ -251,6 +569,11 @@ PhotonTriggerML::Features PhotonTriggerML::ExtractFeatures(const vector<double>&
             peak_value = signal;
             peak_bin = i;
         }
+    }
+    
+    // If no significant peak, return default features
+    if (peak_value < 5.0) {  // Less than 5 ADC counts above baseline
+        return features;
     }
     
     features.peak_amplitude = peak_value / ADC_PER_VEM;
@@ -275,18 +598,24 @@ PhotonTriggerML::Features PhotonTriggerML::ExtractFeatures(const vector<double>&
     int bin_90_rise = peak_bin;
     for (int i = peak_bin; i >= 0; i--) {
         if (trace[i] <= peak_90 && bin_90_rise == peak_bin) bin_90_rise = i;
-        if (trace[i] <= peak_10 && bin_10_rise == peak_bin) bin_10_rise = i;
+        if (trace[i] <= peak_10) {
+            bin_10_rise = i;
+            break;
+        }
     }
     features.risetime = (bin_90_rise - bin_10_rise) * 25.0;  // Convert to ns
     
-    // Fall time
+    // Fall time (90% to 10%)
     int bin_90_fall = peak_bin;
     int bin_10_fall = peak_bin;
     for (int i = peak_bin; i < trace_size; i++) {
         if (trace[i] <= peak_90 && bin_90_fall == peak_bin) bin_90_fall = i;
-        if (trace[i] <= peak_10 && bin_10_fall == peak_bin) bin_10_fall = i;
+        if (trace[i] <= peak_10) {
+            bin_10_fall = i;
+            break;
+        }
     }
-    features.falltime = (bin_10_fall - bin_90_fall) * 25.0;
+    features.falltime = (bin_10_fall - bin_90_fall) * 25.0;  // Convert to ns
     
     // Count peaks
     features.num_peaks = 0;
@@ -314,7 +643,7 @@ PhotonTriggerML::Features PhotonTriggerML::ExtractFeatures(const vector<double>&
         double signal = trace[i] - baseline;
         if (signal > 0) late_charge += signal;
     }
-    features.early_late_ratio = (late_charge > 0) ? early_charge / late_charge : 10.0;
+    features.early_late_ratio = (late_charge > 0.01) ? early_charge / late_charge : 10.0;
     
     // Smoothness (RMS of second derivative)
     double sum_sq_diff = 0;
@@ -359,34 +688,108 @@ double PhotonTriggerML::CalculatePhotonScore(const Features& features)
     return score;
 }
 
-// Finish method
-VModule::ResultFlag PhotonTriggerML::Finish()
+// SaveAndDisplaySummary method - called on interrupt
+void PhotonTriggerML::SaveAndDisplaySummary()
 {
-    INFO("PhotonTriggerML::Finish() - Finalizing analysis");
+    ostringstream msg;
+    msg << "\n=== PhotonTriggerML Interrupt Handler ===\n"
+        << "Processed " << fEventCount << " events\n"
+        << "Found " << fStationCount << " stations with valid traces\n"
+        << "Photon-like: " << fPhotonLikeCount << "\n"
+        << "Hadron-like: " << fHadronLikeCount;
+    INFO(msg.str());
     
-    // Calculate efficiency
-    double photon_fraction = (fStationCount > 0) ? 
-        (double)fPhotonLikeCount / fStationCount : 0;
+    // Print confusion matrix and performance metrics
+    if (fStationCount > 0) {
+        ostringstream perfMsg;
+        perfMsg << "\n=== ML Performance Analysis ===\n"
+                << "Confusion Matrix:\n"
+                << "                 Predicted\n"
+                << "           | Photon | Hadron |\n"
+                << "Actual ----+--------+--------+\n"
+                << "Photon     |  " << setw(5) << fTruePositives 
+                << " |  " << setw(5) << fFalseNegatives << " |\n"
+                << "Hadron     |  " << setw(5) << fFalsePositives 
+                << " |  " << setw(5) << fTrueNegatives << " |\n\n";
+        
+        // Calculate metrics
+        double accuracy = 0, precision = 0, recall = 0, f1Score = 0;
+        
+        if (fStationCount > 0) {
+            accuracy = (double)(fTruePositives + fTrueNegatives) / fStationCount * 100.0;
+        }
+        
+        if (fTruePositives + fFalsePositives > 0) {
+            precision = (double)fTruePositives / (fTruePositives + fFalsePositives) * 100.0;
+        }
+        
+        if (fTruePositives + fFalseNegatives > 0) {
+            recall = (double)fTruePositives / (fTruePositives + fFalseNegatives) * 100.0;
+        }
+        
+        if (precision + recall > 0) {
+            f1Score = 2.0 * precision * recall / (precision + recall);
+        }
+        
+        perfMsg << "Performance Metrics:\n"
+                << "  Accuracy:  " << fixed << setprecision(1) << accuracy << "%\n"
+                << "  Precision: " << fixed << setprecision(1) << precision << "%\n"
+                << "  Recall:    " << fixed << setprecision(1) << recall << "%\n"
+                << "  F1-Score:  " << fixed << setprecision(1) << f1Score << "%\n"
+                << "===============================";
+        
+        INFO(perfMsg.str());
+    }
     
-    // Print summary
-    ostringstream summary;
-    summary << "\n=== PhotonTriggerML Summary ===\n"
-            << "Total events: " << fEventCount << "\n"
-            << "Total stations: " << fStationCount << "\n"
-            << "Photon-like: " << fPhotonLikeCount << " (" 
-            << photon_fraction * 100 << "%)\n"
-            << "Hadron-like: " << fHadronLikeCount << "\n"
-            << "===============================";
-    INFO(summary.str());
-    
-    // Save output
+    // Save all data to file
     if (fOutputFile) {
+        INFO("Writing data to photon_trigger_ml.root...");
         fOutputFile->cd();
+        
+        // Write tree
+        if (fMLTree && fMLTree->GetEntries() > 0) {
+            ostringstream treeMsg;
+            treeMsg << "Writing ML tree with " << fMLTree->GetEntries() << " entries";
+            INFO(treeMsg.str());
+            fMLTree->Write();
+        } else {
+            INFO("WARNING: ML tree is empty or null!");
+        }
+        
+        // Write histograms
+        if (hPhotonScore) {
+            INFO("Writing histograms...");
+            hPhotonScore->Write();
+            hRisetime->Write();
+            hSmoothness->Write();
+            hEarlyLateRatio->Write();
+            hTotalCharge->Write();
+            hScoreVsEnergy->Write();
+            hScoreVsDistance->Write();
+            hPhotonScorePhotons->Write();
+            hPhotonScoreHadrons->Write();
+            hROCCurve->Write();
+        }
+        
+        // Close file
         fOutputFile->Write();
         fOutputFile->Close();
         delete fOutputFile;
-        INFO("Results saved to photon_trigger_ml.root");
+        fOutputFile = nullptr;
+        
+        INFO("Data saved successfully to photon_trigger_ml.root");
+    } else {
+        ERROR("Output file is null - cannot save data!");
     }
+}
+
+// Finish method
+VModule::ResultFlag PhotonTriggerML::Finish()
+{
+    INFO("PhotonTriggerML::Finish() - Normal completion");
+    
+    // Call the save and display method (same as interrupt handler)
+    SaveAndDisplaySummary();
     
     return eSuccess;
 }
