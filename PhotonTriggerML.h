@@ -3,11 +3,10 @@
 
 /**
  * \file PhotonTriggerML.h
- * \brief Enhanced ML-based photon trigger module with real neural network
+ * \brief Enhanced ML-based photon trigger module with balanced training (FIXED VERSION)
  * 
- * This improved version implements a lightweight feedforward neural network
- * with proper training capabilities and better feature engineering.
- * Designed for FPGA deployment with 8-bit quantized weights.
+ * This version includes Adam optimizer, dropout regularization,
+ * validation set, early stopping, and improved training strategy.
  * 
  * Author: Khoa Nguyen
  * Institution: Michigan Technological University
@@ -21,7 +20,7 @@
 #include <fstream>
 #include <memory>
 #include <array>
-#include <cmath>  // For exp() function in Sigmoid
+#include <cmath>
 
 // Forward declarations
 class TFile;
@@ -29,6 +28,7 @@ class TTree;
 class TH1D;
 class TH2D;
 class TGraph;
+class TCanvas;
 
 namespace evt { class Event; }
 namespace sevt { 
@@ -38,7 +38,7 @@ namespace sevt {
 
 /**
  * \class PhotonTriggerML
- * \brief Enhanced machine learning photon trigger with real neural network
+ * \brief Enhanced machine learning photon trigger with balanced training
  */
 class PhotonTriggerML : public fwk::VModule {
 public:
@@ -102,10 +102,7 @@ public:
     
     /**
      * \class NeuralNetwork
-     * \brief Lightweight feedforward neural network for photon discrimination
-     * 
-     * 3-layer network with ReLU activation, designed for FPGA implementation
-     * Uses 8-bit quantized weights for efficient hardware deployment
+     * \brief Enhanced neural network with Adam optimizer and dropout
      */
     class NeuralNetwork {
     public:
@@ -115,23 +112,24 @@ public:
         /**
          * \brief Initialize network with random weights
          * \param input_size Number of input features (17 for EnhancedFeatures)
-         * \param hidden1_size First hidden layer size (default 32)
-         * \param hidden2_size Second hidden layer size (default 16)
+         * \param hidden1_size First hidden layer size
+         * \param hidden2_size Second hidden layer size
          */
-        void Initialize(int input_size = 17, int hidden1_size = 32, int hidden2_size = 16);
+        void Initialize(int input_size = 17, int hidden1_size = 24, int hidden2_size = 12);
         
         /**
          * \brief Forward pass through the network
          * \param features Input feature vector
+         * \param training Whether to apply dropout (true during training)
          * \return Photon probability (0-1)
          */
-        double Predict(const std::vector<double>& features);
+        double Predict(const std::vector<double>& features, bool training = false);
         
         /**
-         * \brief Train the network on a batch of examples
+         * \brief Train the network on a batch of examples with Adam optimizer
          * \param features Batch of feature vectors
          * \param labels Batch of labels (1 for photon, 0 for hadron)
-         * \param learning_rate Learning rate (default 0.001)
+         * \param learning_rate Learning rate
          * \return Average loss for the batch
          */
         double Train(const std::vector<std::vector<double>>& features,
@@ -172,11 +170,29 @@ public:
         std::vector<double> fBias2;
         double fBias3;
         
-        // Activation function (ReLU)
+        // Adam optimizer momentum terms
+        std::vector<std::vector<double>> fMomentum1_w1;
+        std::vector<std::vector<double>> fMomentum2_w1;
+        std::vector<std::vector<double>> fMomentum1_w2;
+        std::vector<std::vector<double>> fMomentum2_w2;
+        std::vector<std::vector<double>> fMomentum1_w3;
+        std::vector<std::vector<double>> fMomentum2_w3;
+        
+        std::vector<double> fMomentum1_b1;
+        std::vector<double> fMomentum2_b1;
+        std::vector<double> fMomentum1_b2;
+        std::vector<double> fMomentum2_b2;
+        double fMomentum1_b3;
+        double fMomentum2_b3;
+        
+        int fTimeStep;  ///< Adam optimizer time step
+        
+        // Dropout parameters
+        double fDropoutRate;
+        
+        // Activation functions
         double ReLU(double x) { return x > 0 ? x : 0; }
         double ReLUDerivative(double x) { return x > 0 ? 1 : 0; }
-        
-        // Sigmoid for output layer
         double Sigmoid(double x) { return 1.0 / (1.0 + exp(-x)); }
         
         // Quantization parameters
@@ -224,6 +240,12 @@ private:
     std::vector<double> NormalizeFeatures(const EnhancedFeatures& features);
     
     /**
+     * \brief Update running statistics for adaptive normalization
+     * \param features Current feature set
+     */
+    void UpdateFeatureStatistics(const EnhancedFeatures& features);
+    
+    /**
      * \brief Process a single station
      * \param station Station to process
      */
@@ -231,13 +253,24 @@ private:
     
     /**
      * \brief Train the neural network on accumulated data
+     * \return Validation loss for early stopping
      */
-    void TrainNetwork();
+    double TrainNetwork();
     
     /**
      * \brief Calculate performance metrics
      */
     void CalculatePerformanceMetrics();
+    
+    /**
+     * \brief Calculate and display metrics in table format
+     */
+    void CalculateAndDisplayMetrics();
+    
+    /**
+     * \brief Extract trace data from PMT
+     */
+    bool ExtractTraceData(const sevt::PMT& pmt, std::vector<double>& trace_data);
     
     /**
      * \brief Write analysis to log file
@@ -250,8 +283,18 @@ private:
     // Training data accumulation
     std::vector<std::vector<double>> fTrainingFeatures;
     std::vector<int> fTrainingLabels;
+    
+    // Validation data for early stopping
+    std::vector<std::vector<double>> fValidationFeatures;
+    std::vector<int> fValidationLabels;
+    
     bool fIsTraining;
     int fTrainingEpochs;
+    int fTrainingStep;  // Training step counter for learning rate scheduling
+    
+    // Early stopping parameters
+    double fBestValidationLoss;
+    int fEpochsSinceImprovement;
     
     // Event and station counters
     int fEventCount;
@@ -291,6 +334,12 @@ private:
     TH2D* hScoreVsEnergy;
     TH2D* hScoreVsDistance;
     TGraph* gROCCurve;
+    
+    // Additional debugging histograms
+    TH2D* hConfusionMatrix;
+    TH1D* hTrainingLoss;
+    TH1D* hValidationLoss;
+    TH1D* hAccuracyHistory;
     
     // Performance metrics
     int fTruePositives;

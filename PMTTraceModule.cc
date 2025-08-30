@@ -1,5 +1,5 @@
 // PMTTraceModule.cc
-// Enhanced version with particle type in histogram titles and ML results
+// Complete version with proper histogram saving and ML integration
 
 #include "PMTTraceModule.h"
 #include "PhotonTriggerML.h"  // Added to access ML results
@@ -37,6 +37,8 @@
 #include <TDirectory.h>
 #include <TMath.h>
 #include <TPad.h>
+#include <TPaveStats.h>
+#include <TStyle.h>
 
 #include <iostream>
 #include <iomanip>
@@ -82,7 +84,7 @@ void SignalHandler(int signal)
 
 // Constructor
 PMTTraceModule::PMTTraceModule() :
-    fOutputFileName("pmt_traces_01EeV.root"),
+    fOutputFileName("pmt_traces_1EeV.root"),
     fEventCount(0),
     fProcessedEvents(0),
     fTracesFound(0),
@@ -118,6 +120,13 @@ PMTTraceModule::PMTTraceModule() :
     hTotalCharge(0),
     hVEMCharge(0),
     hChargeVsDistance(0),
+    hTriggerTypes(0),
+    hVEMChargeMOPS(0),
+    hVEMChargeToTD(0),
+    hVEMChargeThreshold(0),
+    hVEMChargeOther(0),
+    hChargeVsDistanceMOPS(0),
+    hChargeVsDistanceToTD(0),
     hParticleTypes(0),
     hVEMChargePhoton(0),
     hVEMChargeProton(0),
@@ -139,7 +148,7 @@ VModule::ResultFlag PMTTraceModule::Init()
 {
     INFO("PMTTraceModule::Init() - Starting initialization");
     
-    // Hardcode the output filename
+    // Set output filename
     fOutputFileName = "pmt_traces_1EeV.root";
     
     INFO("=== PMT Trace Extractor Configuration ===");
@@ -149,6 +158,7 @@ VModule::ResultFlag PMTTraceModule::Init()
     INFO("Expected baseline: ~50 ADC (simulation) or ~350 ADC (real data)");
     INFO("Trigger types monitored: SB, ToT, ToTD, MOPS, EM, DL");
     INFO("Primary particle types tracked in histograms");
+    INFO("Maximum trace histograms to save: " + to_string(fMaxHistograms));
     INFO("==========================================");
     
     // Create output file
@@ -157,6 +167,17 @@ VModule::ResultFlag PMTTraceModule::Init()
         ERROR("Failed to create output file");
         return eFailure;
     }
+    
+    // Create TraceHistograms directory immediately
+    TDirectory* traceDir = fOutputFile->mkdir("TraceHistograms");
+    if (!traceDir) {
+        ERROR("Failed to create TraceHistograms directory");
+        return eFailure;
+    }
+    INFO("Created TraceHistograms directory in ROOT file");
+    
+    // Return to main directory
+    fOutputFile->cd();
     
     // Create histograms
     hEventEnergy = new TH1D("hEventEnergy", "Primary Energy;E [eV];Events", 100, 1e16, 1e20);
@@ -169,6 +190,7 @@ VModule::ResultFlag PMTTraceModule::Init()
     hVEMCharge = new TH1D("hVEMCharge", "VEM Charge;VEM;Entries", 200, 0, 300);
     hChargeVsDistance = new TH2D("hChargeVsDistance", "Charge vs Distance;r [m];VEM", 
                                  50, 0, 3000, 100, 0.1, 1000);
+    hChargeVsDistance->SetOption("COLZ");
     
     // Add trigger type specific histograms
     hTriggerTypes = new TH1D("hTriggerTypes", "Trigger Types;Algorithm;Count", 12, 0, 12);
@@ -210,9 +232,12 @@ VModule::ResultFlag PMTTraceModule::Init()
     hChargeVsDistanceMOPS = new TH2D("hChargeVsDistanceMOPS", 
                                      "Charge vs Distance (MOPS);r [m];VEM", 
                                      50, 0, 3000, 100, 0.1, 1000);
+    hChargeVsDistanceMOPS->SetOption("COLZ");
+    
     hChargeVsDistanceToTD = new TH2D("hChargeVsDistanceToTD", 
                                      "Charge vs Distance (ToTD);r [m];VEM", 
                                      50, 0, 3000, 100, 0.1, 1000);
+    hChargeVsDistanceToTD->SetOption("COLZ");
     
     // Initialize trace histogram array
     fTraceHistograms = new TObjArray();
@@ -383,7 +408,7 @@ VModule::ResultFlag PMTTraceModule::Run(Event& event)
     return eSuccess;
 }
 
-// ProcessStations method - no changes needed here
+// ProcessStations method
 void PMTTraceModule::ProcessStations(const Event& event)
 {
     const SEvent& sevent = event.GetSEvent();
@@ -560,7 +585,7 @@ void PMTTraceModule::ProcessStations(const Event& event)
     }
 }
 
-// ProcessPMTs method - modified to include particle type in histogram titles
+// ProcessPMTs method - with improved histogram saving
 int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
 {
     int tracesFound = 0;
@@ -656,7 +681,25 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
                         traceHist->SetBinContent(i+1, fTraceData[i]);
                     }
                     
+                    // Add to collection
                     fTraceHistograms->Add(traceHist);
+                    
+                    // IMPORTANT: Write histogram immediately to file
+                    if (fOutputFile) {
+                        // Save to TraceHistograms directory
+                        TDirectory* traceDir = fOutputFile->GetDirectory("TraceHistograms");
+                        if (traceDir) {
+                            traceDir->cd();
+                            traceHist->Write();
+                            fOutputFile->cd();
+                        }
+                        
+                        // Also save to main directory for quick access (first 100 only)
+                        if (fTracesFound < 100) {
+                            fOutputFile->cd();
+                            traceHist->Write();
+                        }
+                    }
                 }
                 
                 // Fill summary histograms
@@ -739,7 +782,7 @@ int PMTTraceModule::ProcessPMTs(const sevt::Station& station)
     return tracesFound;
 }
 
-// ProcessTimeDistribution method - modified to include particle type
+// ProcessTimeDistribution method
 bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& timeDist)
 {
     // Extract trace data from TimeDistribution
@@ -817,6 +860,23 @@ bool PMTTraceModule::ProcessTimeDistribution(const utl::TimeDistribution<int>& t
         }
         
         fTraceHistograms->Add(traceHist);
+        
+        // Write immediately to file
+        if (fOutputFile) {
+            // Save to TraceHistograms directory
+            TDirectory* traceDir = fOutputFile->GetDirectory("TraceHistograms");
+            if (traceDir) {
+                traceDir->cd();
+                traceHist->Write();
+                fOutputFile->cd();
+            }
+            
+            // Also save to main directory for quick access (first 100 only)
+            if (fTracesFound < 100) {
+                fOutputFile->cd();
+                traceHist->Write();
+            }
+        }
     }
     
     // Fill summary histograms  
@@ -944,7 +1004,7 @@ void PMTTraceModule::FillParticleSpecificHistograms()
     }
 }
 
-// SaveAndDisplayTraces method
+// SaveAndDisplayTraces method - called on interrupt
 void PMTTraceModule::SaveAndDisplayTraces()
 {
     ostringstream msg;
@@ -983,30 +1043,51 @@ void PMTTraceModule::SaveAndDisplayTraces()
     }
     INFO("==================================");
     
-    // First save all data to file
+    // Save all data to file
     if (fOutputFile) {
         fOutputFile->cd();
         
-        // Write trace histograms
-        if (fTraceHistograms && fTraceHistograms->GetEntries() > 0) {
-            INFO("Writing trace histograms to file...");
-            
-            // Create a directory for trace histograms
-            TDirectory* traceDir = fOutputFile->mkdir("TraceHistograms");
-            traceDir->cd();
-            
-            // Write all histograms
-            fTraceHistograms->Write();
-            
-            ostringstream msg2;
-            msg2 << "Wrote " << fTraceHistograms->GetEntries() << " trace histograms";
-            INFO(msg2.str());
-            
-            // Go back to main directory
-            fOutputFile->cd();
+        // Write all summary histograms
+        if (hEventEnergy) hEventEnergy->Write("", TObject::kOverwrite);
+        if (hZenithAngle) hZenithAngle->Write("", TObject::kOverwrite);
+        if (hNStations) hNStations->Write("", TObject::kOverwrite);
+        if (hNTracesPerEvent) hNTracesPerEvent->Write("", TObject::kOverwrite);
+        if (hTraceLength) hTraceLength->Write("", TObject::kOverwrite);
+        if (hPeakValue) hPeakValue->Write("", TObject::kOverwrite);
+        if (hTotalCharge) hTotalCharge->Write("", TObject::kOverwrite);
+        if (hVEMCharge) hVEMCharge->Write("", TObject::kOverwrite);
+        if (hChargeVsDistance) hChargeVsDistance->Write("", TObject::kOverwrite);
+        if (hTriggerTypes) hTriggerTypes->Write("", TObject::kOverwrite);
+        if (hParticleTypes) hParticleTypes->Write("", TObject::kOverwrite);
+        
+        // Write the tree
+        if (fTraceTree) {
+            fTraceTree->Write("", TObject::kOverwrite);
         }
         
-        // Write everything else
+        // Make sure all trace histograms are written
+        if (fTraceHistograms && fTraceHistograms->GetEntries() > 0) {
+            INFO("Writing/updating trace histograms to file...");
+            
+            TDirectory* traceDir = fOutputFile->GetDirectory("TraceHistograms");
+            if (traceDir) {
+                traceDir->cd();
+                
+                for (int i = 0; i < fTraceHistograms->GetEntries(); i++) {
+                    TH1D* hist = (TH1D*)fTraceHistograms->At(i);
+                    if (hist) {
+                        hist->Write("", TObject::kOverwrite);
+                    }
+                }
+                
+                fOutputFile->cd();
+            }
+            
+            ostringstream msg2;
+            msg2 << "Updated " << fTraceHistograms->GetEntries() << " trace histograms";
+            INFO(msg2.str());
+        }
+        
         fOutputFile->Write();
         INFO("Data saved to file.");
     }
@@ -1019,43 +1100,47 @@ void PMTTraceModule::SaveAndDisplayTraces()
         TCanvas* c1 = new TCanvas("c1", "Sample FADC Traces", 1200, 800);
         c1->Divide(2, 2);
         
-        // Select interesting traces to display (try to get different trigger types)
+        // Select interesting traces to display
         int nHists = fTraceHistograms->GetEntries();
-        int indices[4];
+        int displayed = 0;
         
-        if (nHists <= 4) {
-            for (int i = 0; i < nHists; i++) indices[i] = i;
-        } else {
-            indices[0] = 0;
-            indices[1] = nHists / 3;
-            indices[2] = 2 * nHists / 3;
-            indices[3] = nHists - 1;
+        // Try to find one of each particle type
+        vector<string> particleTypes = {"photon", "proton", "iron", "electron"};
+        for (const string& particle : particleTypes) {
+            for (int i = 0; i < nHists && displayed < 4; i++) {
+                TH1D* hist = (TH1D*)fTraceHistograms->At(i);
+                if (hist) {
+                    TString title = hist->GetTitle();
+                    if (title.Contains(particle.c_str())) {
+                        c1->cd(displayed + 1);
+                        gPad->SetGrid();
+                        
+                        hist->SetLineColor(kBlue);
+                        hist->SetLineWidth(2);
+                        hist->Draw();
+                        hist->GetXaxis()->SetRangeUser(0, 2048);
+                        
+                        displayed++;
+                        break;
+                    }
+                }
+            }
         }
         
-        // Display selected traces
-        for (int i = 0; i < TMath::Min(4, nHists); i++) {
-            c1->cd(i + 1);
-            gPad->SetGrid();
-            
-            TH1D* hist = (TH1D*)fTraceHistograms->At(indices[i]);
-            if (hist) {
-                hist->SetLineColor(kBlue);
-                hist->SetLineWidth(2);
-                hist->Draw();
+        // If we didn't find all types, just display first few
+        if (displayed < 4) {
+            for (int i = 0; i < TMath::Min(4, nHists) && displayed < 4; i++) {
+                c1->cd(displayed + 1);
+                gPad->SetGrid();
                 
-                // Set x-axis range to show full trace
-                hist->GetXaxis()->SetRangeUser(0, 2048);
-                
-                // Add statistics
-                double maxBin = hist->GetMaximumBin();
-                double maxVal = hist->GetMaximum();
-                double integral = hist->Integral();
-                
-                ostringstream traceInfo;
-                traceInfo << "Trace index " << indices[i] << ": " << hist->GetTitle()
-                          << " (Peak: " << maxVal << " at bin " << maxBin 
-                          << ", Total: " << integral << ")";
-                INFO(traceInfo.str());
+                TH1D* hist = (TH1D*)fTraceHistograms->At(i);
+                if (hist) {
+                    hist->SetLineColor(kBlue);
+                    hist->SetLineWidth(2);
+                    hist->Draw();
+                    hist->GetXaxis()->SetRangeUser(0, 2048);
+                    displayed++;
+                }
             }
         }
         
@@ -1066,51 +1151,23 @@ void PMTTraceModule::SaveAndDisplayTraces()
         c1->SaveAs("sample_fadc_traces.pdf");
         INFO("Sample traces saved to sample_fadc_traces.png and .pdf");
         
-        // Create trigger summary canvas
-        TCanvas* c2 = new TCanvas("c2", "Trigger Analysis", 1200, 800);
-        c2->Divide(2, 2);
-        
-        c2->cd(1);
-        gPad->SetLogy();
-        hTriggerTypes->Draw();
-        
-        c2->cd(2);
-        gPad->SetLogy();
-        hVEMChargeMOPS->SetLineColor(kRed);
-        hVEMChargeMOPS->Draw();
-        hVEMChargeToTD->SetLineColor(kBlue);
-        hVEMChargeToTD->Draw("same");
-        hVEMChargeThreshold->SetLineColor(kGreen);
-        hVEMChargeThreshold->Draw("same");
-        
-        c2->cd(3);
-        gPad->SetLogz();
-        hChargeVsDistanceMOPS->Draw("colz");
-        
-        c2->cd(4);
-        hParticleTypes->Draw();
-        
-        c2->Update();
-        c2->SaveAs("trigger_analysis.png");
-        c2->SaveAs("trigger_analysis.pdf");
-        INFO("Trigger analysis saved to trigger_analysis.png and .pdf");
-        
         // Keep displayed for a moment
         gSystem->ProcessEvents();
         gSystem->Sleep(3000);
         
         delete c1;
-        delete c2;
     }
     
     // Close the output file
     if (fOutputFile) {
         fOutputFile->Close();
         delete fOutputFile;
+        fOutputFile = 0;
         
         ostringstream msg3;
         msg3 << "Output written to " << fOutputFileName;
         INFO(msg3.str());
+        INFO("To view trace histograms: root -l " + fOutputFileName + " and browse TraceHistograms directory");
     }
 }
 
@@ -1150,22 +1207,74 @@ VModule::ResultFlag PMTTraceModule::Finish()
     if (fOutputFile) {
         fOutputFile->cd();
         
-        // Write trace histograms
-        if (fTraceHistograms && fTraceHistograms->GetEntries() > 0) {
-            INFO("Writing trace histograms...");
-            
-            TDirectory* traceDir = fOutputFile->mkdir("TraceHistograms");
-            traceDir->cd();
-            
-            fTraceHistograms->Write();
-            
-            ostringstream msg2;
-            msg2 << "Wrote " << fTraceHistograms->GetEntries() << " trace histograms";
-            INFO(msg2.str());
-            
-            fOutputFile->cd();
+        // Write all summary histograms
+        INFO("Writing summary histograms...");
+        if (hEventEnergy) hEventEnergy->Write();
+        if (hZenithAngle) hZenithAngle->Write();
+        if (hNStations) hNStations->Write();
+        if (hNTracesPerEvent) hNTracesPerEvent->Write();
+        if (hTraceLength) hTraceLength->Write();
+        if (hPeakValue) hPeakValue->Write();
+        if (hTotalCharge) hTotalCharge->Write();
+        if (hVEMCharge) hVEMCharge->Write();
+        if (hChargeVsDistance) hChargeVsDistance->Write();
+        if (hTriggerTypes) hTriggerTypes->Write();
+        if (hParticleTypes) hParticleTypes->Write();
+        if (hVEMChargeMOPS) hVEMChargeMOPS->Write();
+        if (hVEMChargeToTD) hVEMChargeToTD->Write();
+        if (hVEMChargeThreshold) hVEMChargeThreshold->Write();
+        if (hVEMChargeOther) hVEMChargeOther->Write();
+        if (hVEMChargePhoton) hVEMChargePhoton->Write();
+        if (hVEMChargeProton) hVEMChargeProton->Write();
+        if (hVEMChargeIron) hVEMChargeIron->Write();
+        if (hChargeVsDistanceMOPS) hChargeVsDistanceMOPS->Write();
+        if (hChargeVsDistanceToTD) hChargeVsDistanceToTD->Write();
+        
+        // Write the tree
+        if (fTraceTree) {
+            fTraceTree->Write();
+            ostringstream treeMsg;
+            treeMsg << "Wrote tree with " << fTraceTree->GetEntries() << " entries";
+            INFO(treeMsg.str());
         }
         
+        // Final write of trace histograms
+        if (fTraceHistograms && fTraceHistograms->GetEntries() > 0) {
+            INFO("Finalizing trace histograms...");
+            
+            // Make sure TraceHistograms directory exists and is complete
+            TDirectory* traceDir = fOutputFile->GetDirectory("TraceHistograms");
+            if (!traceDir) {
+                traceDir = fOutputFile->mkdir("TraceHistograms");
+            }
+            traceDir->cd();
+            
+            // Write all histograms (overwrite if they exist)
+            for (int i = 0; i < fTraceHistograms->GetEntries(); i++) {
+                TH1D* hist = (TH1D*)fTraceHistograms->At(i);
+                if (hist) {
+                    hist->Write("", TObject::kOverwrite);
+                }
+            }
+            
+            ostringstream msg2;
+            msg2 << "Finalized " << fTraceHistograms->GetEntries() 
+                 << " trace histograms in TraceHistograms directory";
+            INFO(msg2.str());
+            
+            // Also ensure first 100 are in main directory for quick access
+            fOutputFile->cd();
+            for (int i = 0; i < TMath::Min(100, fTraceHistograms->GetEntries()); i++) {
+                TH1D* hist = (TH1D*)fTraceHistograms->At(i);
+                if (hist) {
+                    hist->Write("", TObject::kOverwrite);
+                }
+            }
+            
+            INFO("Also wrote first 100 trace histograms to main directory for quick access");
+        }
+        
+        // Final file write and close
         fOutputFile->Write();
         fOutputFile->Close();
         delete fOutputFile;
@@ -1174,6 +1283,12 @@ VModule::ResultFlag PMTTraceModule::Finish()
         ostringstream msg3;
         msg3 << "Output written to " << fOutputFileName;
         INFO(msg3.str());
+        INFO("========================================");
+        INFO("To view trace histograms:");
+        INFO("  root -l " + fOutputFileName);
+        INFO("  TBrowser b;  // Then browse to TraceHistograms directory");
+        INFO("  OR use: root -l check_traces.C");
+        INFO("========================================");
     }
     
     return eSuccess;
