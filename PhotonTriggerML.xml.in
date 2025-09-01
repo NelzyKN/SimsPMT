@@ -9,7 +9,7 @@
   <EnergyMax unit="eV"> 1e19 </EnergyMax>
 
   <!-- Neural Network threshold for photon classification -->
-  <PhotonThreshold> 0.5 </PhotonThreshold>
+  <PhotonThreshold> 0.65 </PhotonThreshold>
 
   <!-- Output file -->
   <OutputFile> photon_trigger_ml.root </OutputFile>
@@ -21,3 +21,4 @@
   <ApplyTrigger> true </ApplyTrigger>
 
 </PhotonTriggerML>
+
