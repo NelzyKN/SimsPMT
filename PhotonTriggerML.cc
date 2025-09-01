@@ -1,4 +1,4 @@
-// PhotonTriggerML.cc  (precision-first decision rule + conservative auto-thresholding)
+// PhotonTriggerML.cc  (precision-first decision rule + FPR-controlled auto-thresholding)
 // Header unchanged: no new fields or method declarations required.
 
 #include "PhotonTriggerML.h"
@@ -160,7 +160,7 @@ double PhotonTriggerML::NeuralNetwork::Train(const std::vector<std::vector<doubl
     int B = (int)X.size();
     int nP = std::count(y.begin(), y.end(), 1);
 
-    // Softer class weights (precision-friendly)
+    // Softer photon weight (precision-friendly)
     double wP = (nP > 0) ? 1.5 : 1.0;
     double wN = 1.0;
 
@@ -195,6 +195,7 @@ double PhotonTriggerML::NeuralNetwork::Train(const std::vector<std::vector<doubl
         total += -w * (label*log(p+1e-7) + (1-label)*log(1-p+1e-7));
         double dOut = w * (p - label);
 
+        for (int j=0;j*fHidden2Size; ++j) {} // guard against -Wmisleading-indentation (no-op)
         for (int j=0;j<fHidden2Size;++j) gw3[0][j] += dOut * h2[j];
         gb3 += dOut;
 
@@ -334,10 +335,10 @@ PhotonTriggerML::PhotonTriggerML() :
     hScoreVsEnergy(nullptr), hScoreVsDistance(nullptr), gROCCurve(nullptr),
     hConfusionMatrix(nullptr), hTrainingLoss(nullptr), hValidationLoss(nullptr), hAccuracyHistory(nullptr),
     fTruePositives(0), fFalsePositives(0), fTrueNegatives(0), fFalseNegatives(0),
-    // Start conservatively; auto-calibration will adjust within safe bounds.
+    // Conservative default; XML can override; calibration refines within bounds
     fPhotonThreshold(0.72),
     fEnergyMin(1e18), fEnergyMax(1e19),
-    // Match your XML default name to avoid confusion:
+    // Match XML default name to avoid confusion:
     fOutputFileName("photon_trigger_ml.root"),
     fWeightsFileName("photon_trigger_weights_physics.txt"),
     fLoadPretrainedWeights(true)
@@ -430,6 +431,27 @@ VModule::ResultFlag PhotonTriggerML::Init()
     return eSuccess;
 }
 
+// Utility helpers
+static inline double median_of(std::vector<double> v) {
+    if (v.empty()) return 0.5;
+    size_t n = v.size()/2;
+    std::nth_element(v.begin(), v.begin()+n, v.end());
+    double m = v[n];
+    if (v.size()%2==0) {
+        std::nth_element(v.begin(), v.begin()+n-1, v.end());
+        m = 0.5*(m+v[n-1]);
+    }
+    return m;
+}
+static inline double quantile_of(std::vector<double> v, double q) {
+    if (v.empty()) return 0.5;
+    if (q <= 0) return *std::min_element(v.begin(), v.end());
+    if (q >= 1) return *std::max_element(v.begin(), v.end());
+    size_t k = (size_t)std::floor(q * (v.size()-1));
+    std::nth_element(v.begin(), v.begin()+k, v.end());
+    return v[k];
+}
+
 VModule::ResultFlag PhotonTriggerML::Run(Event& event)
 {
     fEventCount++;
@@ -491,19 +513,6 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
     return eSuccess;
 }
 
-// Utility
-static inline double median_of(std::vector<double> v) {
-    if (v.empty()) return 0.5;
-    size_t n = v.size()/2;
-    std::nth_element(v.begin(), v.begin()+n, v.end());
-    double m = v[n];
-    if (v.size()%2==0) {
-        std::nth_element(v.begin(), v.begin()+n-1, v.end());
-        m = 0.5*(m+v[n-1]);
-    }
-    return m;
-}
-
 void PhotonTriggerML::ProcessStation(const sevt::Station& station)
 {
     fStationId = station.GetId();
@@ -520,7 +529,22 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
         fDistance = -1; return;
     }
 
+    // ---- Per-PMT analysis (scores + gates) ----
     const int firstPMT = sdet::Station::GetFirstPMTId();
+    struct PMTRes {
+        bool valid{false};
+        double score{0};
+        bool emLike{false};
+        bool muonSpike{false};
+        double TOT10_ns{0};
+        double TOTabs_ns{0};
+        EnhancedFeatures feat{};
+        std::vector<double> norm;
+    };
+    PMTRes res[3];
+    bool anyPMT=false;
+    double maxScore=0.0;
+
     for (int p = 0; p < 3; p++) {
         const int pmtId = p + firstPMT;
         if (!station.HasPMT(pmtId)) continue;
@@ -533,16 +557,14 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
         double minVal = *min_element(trace_data.begin(), trace_data.end());
         if (maxVal - minVal < 10.0) continue;
 
-        // Main feature set
-        fFeatures = ExtractEnhancedFeatures(trace_data);
+        // Features
+        EnhancedFeatures F = ExtractEnhancedFeatures(trace_data);
 
-        // --------- Extra timing/TOT proxies for decision gates ----------
+        // TOT proxies & baseline
         const double NS_PER_BIN = 25.0;
-        double baseline = 0; for (int i=0;i<100;i++) baseline += trace_data[i]; baseline/=100.0;
-
-        double peakVal = 0;
+        double baseline = 0.0; for (int i=0;i<100;i++) baseline += trace_data[i]; baseline/=100.0;
+        double peakVal = 0.0;
         for (double v: trace_data) { double s=v-baseline; if (s<0) s=0; if (s>peakVal) peakVal=s; }
-
         int tot10_bins = 0, totAbs_bins = 0;
         const double thrFrac10 = 0.10 * peakVal;
         const double thrAbs = 15.0;
@@ -554,14 +576,14 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
         double TOT10_ns  = tot10_bins * NS_PER_BIN;
         double TOTabs_ns = totAbs_bins * NS_PER_BIN;
 
-        // Feature hists / stats
-        hRisetime->Fill(fFeatures.risetime_10_90);
-        hAsymmetry->Fill(fFeatures.asymmetry);
-        hKurtosis->Fill(fFeatures.kurtosis);
-        UpdateFeatureStatistics(fFeatures);
+        // Hist/stats
+        hRisetime->Fill(F.risetime_10_90);
+        hAsymmetry->Fill(F.asymmetry);
+        hKurtosis->Fill(F.kurtosis);
+        UpdateFeatureStatistics(F);
 
-        // Normalize + emphasize key physics features
-        std::vector<double> normalized = NormalizeFeatures(fFeatures);
+        // Normalize + emphasize
+        std::vector<double> normalized = NormalizeFeatures(F);
         normalized[1]  *= 2.0;  // risetime_10_90
         normalized[3]  *= 2.0;  // pulse_width
         normalized[7]  *= 1.5;  // peak_charge_ratio
@@ -569,52 +591,37 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
 
         double ml_score = fNeuralNetwork->Predict(normalized, false);
 
-        // Precision-safe muon-spike penalty (guarded by very short TOT)
-        double penalty = 0.0;
-        const bool muonSpike =
-            (fFeatures.pulse_width < 120.0) &&
-            (fFeatures.peak_charge_ratio > 0.45) &&
-            (fFeatures.num_peaks <= 2) &&
-            (fFeatures.late_fraction < 0.15) &&
+        // Physics gates
+        bool muonSpike =
+            (F.pulse_width < 120.0) &&
+            (F.peak_charge_ratio > 0.45) &&
+            (F.num_peaks <= 2) &&
+            (F.late_fraction < 0.15) &&
             (TOTabs_ns < 150.0);
 
-        if (muonSpike) penalty -= 0.20;
-        if (fFeatures.num_peaks <= 2 && fFeatures.secondary_peak_ratio > 0.60 && TOTabs_ns < 150.0)
-            penalty -= 0.10;
-
-        // EM-like boost for wide/TOT-rich or multi-peak signals
-        double boost = 0.0;
-        const bool emLike =
-            (fFeatures.pulse_width >= 150.0 && fFeatures.pulse_width <= 900.0) ||
-            (fFeatures.num_peaks >= 3) ||
+        bool emLike =
+            (F.pulse_width >= 150.0 && F.pulse_width <= 900.0) ||
+            (F.num_peaks >= 3) ||
             (TOT10_ns >= 180.0) ||
-            (fFeatures.late_fraction > 0.25);
+            (F.late_fraction > 0.25);
 
+        double penalty = 0.0, boost = 0.0;
+        if (muonSpike) penalty -= 0.20;
+        if (F.num_peaks <= 2 && F.secondary_peak_ratio > 0.60 && TOTabs_ns < 150.0)
+            penalty -= 0.10;
         if (emLike) boost += 0.08;
         if (TOT10_ns >= 250.0) boost += 0.04;
 
-        fPhotonScore = std::max(0.0, std::min(1.0, ml_score + penalty + boost));
-        fConfidence  = std::fabs(fPhotonScore - 0.5);
+        double score = std::max(0.0, std::min(1.0, ml_score + penalty + boost));
 
-        // Conservative, calibrated threshold (base + tiny distance nudge)
-        double thr = fPhotonThreshold;
-        if (fDistance > 2000.0) thr -= 0.03;
+        // Save PMT result
+        res[p].valid=true; res[p].score=score; res[p].emLike=emLike; res[p].muonSpike=muonSpike;
+        res[p].TOT10_ns=TOT10_ns; res[p].TOTabs_ns=TOTabs_ns; res[p].feat=F; res[p].norm=normalized;
+        anyPMT=true;
+        if (score>maxScore) maxScore=score;
 
-        // keep within safe bounds
-        const double THR_MIN = 0.62, THR_MAX = 0.90;
-        if (thr < THR_MIN) thr = THR_MIN;
-        if (thr > THR_MAX) thr = THR_MAX;
-
-        const double thrMid  = std::max(0.55, thr - 0.08);
-        const double thrHigh = thr;
-
-        // Two-stage decision (precision-first)
-        bool identifiedAsPhoton =
-            (fPhotonScore >= thrHigh) ||
-            (fPhotonScore >= thrMid  && emLike && !muonSpike);
-
-        // --- training buffers (reduced oversampling) ---
-        bool isValidation = (fStationCount % 10 == 0);
+        // ---- Training buffers per PMT (reduced oversampling) ----
+        bool isValidation = ((fStationCount + p) % 10 == 0);
         if (fIsTraining) {
             if (!isValidation) {
                 if (fIsActualPhoton) {
@@ -635,36 +642,66 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
                 fValidationLabels.push_back(fIsActualPhoton ? 1 : 0);
             }
         }
+    } // PMT loop
 
-        fStationCount++;
-        // Update counters
-        if (identifiedAsPhoton) {
-            fPhotonLikeCount++;
-            if (fIsActualPhoton) fTruePositives++; else fFalsePositives++;
-        } else {
-            fHadronLikeCount++;
-            if (!fIsActualPhoton) fTrueNegatives++; else fFalseNegatives++;
-        }
+    if (!anyPMT) return;
 
-        hPhotonScore->Fill(fPhotonScore);
-        hConfidence->Fill(fConfidence);
-        if (fIsActualPhoton) hPhotonScorePhotons->Fill(fPhotonScore);
-        else                 hPhotonScoreHadrons->Fill(fPhotonScore);
-        hScoreVsEnergy->Fill(fEnergy, fPhotonScore);
-        hScoreVsDistance->Fill(fDistance, fPhotonScore);
-        fMLTree->Fill();
+    // --- Station-level decision (vote) ---
+    // Conservative calibrated threshold with small distance nudge
+    double thr = fPhotonThreshold;
+    if (fDistance > 2000.0) thr -= 0.03;
+    const double THR_MIN = 0.65, THR_MAX = 0.95;
+    if (thr < THR_MIN) thr = THR_MIN;
+    if (thr > THR_MAX) thr = THR_MAX;
+    const double thrMid  = std::max(0.55, thr - 0.08);
+    const double thrHigh = thr;
 
-        // Save result object
-        MLResult mlResult;
-        mlResult.photonScore = fPhotonScore;
-        mlResult.identifiedAsPhoton = identifiedAsPhoton;
-        mlResult.isActualPhoton = fIsActualPhoton;
-        mlResult.vemCharge = fFeatures.total_charge;
-        mlResult.features = fFeatures;
-        mlResult.primaryType = fPrimaryType;
-        mlResult.confidence = fConfidence;
-        fMLResultsMap[fStationId] = mlResult;
+    int votes = 0, highVotes = 0, emVotes = 0, nonMuon = 0; double sumTOTabs=0.0;
+    for (int p=0;p<3;p++) if (res[p].valid) {
+        bool midOK  = (res[p].score >= thrMid)  &&  res[p].emLike && !res[p].muonSpike;
+        bool highOK = (res[p].score >= thrHigh);
+        if (midOK || highOK) votes++;
+        if (highOK) highVotes++;
+        if (res[p].emLike) emVotes++;
+        if (!res[p].muonSpike) nonMuon++;
+        sumTOTabs += res[p].TOTabs_ns;
     }
+    bool stationPhoton =
+        (votes >= 2) ||
+        (highVotes >= 1 && emVotes >= 2 && sumTOTabs >= 200.0);
+
+    // --- Update counters once per station ---
+    fStationCount++;
+    fPhotonScore = maxScore;
+    fConfidence = std::fabs(fPhotonScore - 0.5);
+
+    hPhotonScore->Fill(fPhotonScore);
+    hConfidence->Fill(fConfidence);
+    if (fIsActualPhoton) hPhotonScorePhotons->Fill(fPhotonScore);
+    else                 hPhotonScoreHadrons->Fill(fPhotonScore);
+    hScoreVsEnergy->Fill(fEnergy, fPhotonScore);
+    hScoreVsDistance->Fill(fDistance, fPhotonScore);
+    fMLTree->Fill();
+
+    if (stationPhoton) {
+        fPhotonLikeCount++;
+        if (fIsActualPhoton) fTruePositives++; else fFalsePositives++;
+    } else {
+        fHadronLikeCount++;
+        if (!fIsActualPhoton) fTrueNegatives++; else fFalseNegatives++;
+    }
+
+    // Store a representative ML result (max-score PMT’s features)
+    int bestIdx = 0; for (int p=1;p<3;p++) if (res[p].valid && res[p].score > res[bestIdx].score) bestIdx=p;
+    MLResult mlr;
+    mlr.photonScore = fPhotonScore;
+    mlr.identifiedAsPhoton = stationPhoton;
+    mlr.isActualPhoton = fIsActualPhoton;
+    mlr.vemCharge = res[bestIdx].feat.total_charge;
+    mlr.features = res[bestIdx].feat;
+    mlr.primaryType = fPrimaryType;
+    mlr.confidence = fConfidence;
+    fMLResultsMap[fStationId] = mlr;
 }
 
 bool PhotonTriggerML::ExtractTraceData(const sevt::PMT& pmt, std::vector<double>& trace_data)
@@ -840,7 +877,7 @@ double PhotonTriggerML::TrainNetwork()
     double train_loss = total_loss / 10.0;
     cout << " Loss: " << fixed << setprecision(4) << train_loss;
 
-    // ----- Validation & conservative auto-threshold -----
+    // ----- Validation & FPR-controlled auto-threshold -----
     double val_loss = 0;
     if (!fValidationFeatures.empty()) {
         int N = (int)fValidationFeatures.size();
@@ -859,7 +896,7 @@ double PhotonTriggerML::TrainNetwork()
         double acc = 100.0*correct/N;
         cout << " Val: " << val_loss << " (Acc: " << acc << "%)";
 
-        // precision-first threshold search
+        // Precision-first scan (cap positive rate) to get a candidate
         double bestF1=-1, bestThr=fPhotonThreshold;
         for (double thr=0.55; thr<=0.90+1e-9; thr+=0.01) {
             int TP=0,FP=0,TN=0,FN=0;
@@ -876,23 +913,26 @@ double PhotonTriggerML::TrainNetwork()
             if (posRate <= 0.40 && F1 > bestF1) { bestF1 = F1; bestThr = thr; }
         }
 
-        // Bias-aware upward adjustment: if hadron median > 0.5, raise the threshold.
+        // Direct FPR control: set threshold at 1 - targetFPR quantile of hadron scores
         double medH = median_of(hadronP);
-        double biasUp = std::max(0.0, medH - 0.5);
-        const double THR_MIN = 0.62;
+        const double TARGET_FPR = 0.12; // ~12% hadron acceptance on validation
+        double thrFPR = quantile_of(hadronP, 1.0 - TARGET_FPR);
+
+        const double THR_MIN = 0.65, THR_MAX = 0.95;
+        double blended = 0.5*bestThr + 0.5*thrFPR; // combine F1 and FPR targets
         double old = fPhotonThreshold;
-        // smooth update + bias correction, with safety floor
-        fPhotonThreshold = std::max(THR_MIN, 0.8*fPhotonThreshold + 0.2*bestThr + biasUp);
+        fPhotonThreshold = std::max(THR_MIN, std::min(THR_MAX, 0.8*fPhotonThreshold + 0.2*blended));
 
         cout << " | Recalibrated base threshold to " << fixed << setprecision(3) << fPhotonThreshold
-             << " (best=" << bestThr << ", F1=" << bestF1 << ", medH=" << medH << ")";
+             << " (best=" << bestThr << ", F1=" << bestF1 << ", medH=" << medH
+             << ", thrFPR=" << thrFPR << ")";
 
         int batch_num = fEventCount / 5;
         hValidationLoss->SetBinContent(batch_num, val_loss);
         if (fLogFile.is_open()) {
             fLogFile << "Recalibrated threshold: " << old << " -> " << fPhotonThreshold
                      << " (bestF1=" << bestF1 << ", bestThr=" << bestThr
-                     << ", medianHadron=" << medH << ")\n";
+                     << ", medianHadron=" << medH << ", thrFPR=" << thrFPR << ")\n";
         }
     }
     cout << endl;
@@ -1023,7 +1063,7 @@ void PhotonTriggerML::SaveAndDisplaySummary()
         txt.close();
       } }
 
-    // In-place annotation: same decision rule/thresholds as online
+    // In-place annotation: per-TH1 (per-PMT) decision using same thresholds/gates
     if (!gCalledFromSignal) {
         auto strip_ml = [](const std::string& t)->std::string {
             size_t p = t.find(" [ML:"); return (p==std::string::npos)? t : t.substr(0,p);
@@ -1040,30 +1080,30 @@ void PhotonTriggerML::SaveAndDisplaySummary()
             if (X.size()>=17) { X[1]*=2.0; X[3]*=2.0; X[7]*=1.5; X[16]*=1.5; }
             double p = fNeuralNetwork->Predict(X,false);
 
-            // Recompute simple TOTs for gates
+            // Recompute TOTs
             const double NS_PER_BIN = 25.0;
-            double base=0; for (int i=0;i<std::min(100,n);++i) base+=tr[i]; base/=std::min(100,n);
+            double base=0; int preN = std::min(100,n);
+            for (int i=0;i<preN;++i) base+=tr[i]; base/=std::max(1,preN);
             double peak=0; for (double v: tr){ double s=v-base; if(s<0)s=0; if(s>peak)peak=s; }
             int b10=0,bAbs=0; for (double v: tr){ double s=v-base; if(s<0)s=0; if(s>=0.10*peak) b10++; if(s>=15.0) bAbs++; }
             double TOT10_ns=b10*NS_PER_BIN, TOTabs_ns=bAbs*NS_PER_BIN;
 
-            double penalty=0.0;
             bool muonSpike = (F.pulse_width<120.0) && (F.peak_charge_ratio>0.45) &&
                              (F.num_peaks<=2) && (F.late_fraction<0.15) && (TOTabs_ns<150.0);
-            if (muonSpike) penalty -= 0.20;
-            if (F.num_peaks<=2 && F.secondary_peak_ratio>0.60 && TOTabs_ns<150.0) penalty -= 0.10;
-
-            double boost=0.0;
             bool emLike = (F.pulse_width>=150.0 && F.pulse_width<=900.0) || (F.num_peaks>=3) ||
                           (TOT10_ns>=180.0) || (F.late_fraction>0.25);
+
+            double penalty=0.0, boost=0.0;
+            if (muonSpike) penalty -= 0.20;
+            if (F.num_peaks<=2 && F.secondary_peak_ratio>0.60 && TOTabs_ns<150.0) penalty -= 0.10;
             if (emLike) boost += 0.08;
             if (TOT10_ns>=250.0) boost += 0.04;
 
             score = std::max(0.0, std::min(1.0, p + penalty + boost));
 
-            double thr = fPhotonThreshold; // same calibrated threshold
-            if (thr < 0.62) thr = 0.62;
-            if (thr > 0.90) thr = 0.90;
+            double thr = fPhotonThreshold;
+            if (thr < 0.65) thr = 0.65;
+            if (thr > 0.95) thr = 0.95;
             double thrMid = std::max(0.55, thr - 0.08), thrHigh = thr;
 
             isPhoton = (score >= thrHigh) || (score >= thrMid && emLike && !muonSpike);
@@ -1100,7 +1140,7 @@ void PhotonTriggerML::SaveAndDisplaySummary()
                             c->Modified(); c->Update(); dir->cd(); c->Write(c->GetName(), TObject::kOverwrite);
                         } }
                 }
-                // Do not delete objects returned by Get(); ROOT owns them.
+                // Do not delete ROOT-owned objects returned by Get()
             }
         };
 
