@@ -1,12 +1,6 @@
 <?xml version="1.0" encoding="iso-8859-1"?>
 
-<!-- Configuration of PhotonTriggerML Module (balanced training + bounded dynamic threshold)
-     Notes:
-       • PhotonThreshold is a BASE operating point. The code applies a small dynamic
-         adjustment per trace using distance and TOT-like width (risetime+falltime),
-         then clamps the effective threshold to [0.60, 0.82] to avoid “all-photon” / “all-hadron”
-         pathologies seen in earlier logs (see your summaries for 0.80 and 0.72 runs).
-       • We keep this file minimal; additional tags are documented but optional. -->
+<!-- Configuration of PhotonTriggerML Module (calibrated version) -->
 
 <PhotonTriggerML>
 
@@ -14,23 +8,18 @@
   <EnergyMin unit="eV"> 1e18 </EnergyMin>
   <EnergyMax unit="eV"> 1e19 </EnergyMax>
 
-  <!-- Base neural-network threshold for photon classification.
-       Recommended start: 0.65 (dynamic clamp still applies). -->
-  <PhotonThreshold> 0.65 </PhotonThreshold>
+  <!-- Base threshold (auto-updated by the module using MCC scan) -->
+  <PhotonThreshold> 0.72 </PhotonThreshold>
 
-  <!-- Output file -->
+  <!-- Inference output -->
   <OutputFile> photon_trigger_ml.root </OutputFile>
 
-  <!-- Optional (informational only; current code not reading these):
-       <WeightsFile> photon_trigger_weights_physics.txt </WeightsFile>
-       <LoadPretrainedWeights> false </LoadPretrainedWeights>
-  -->
+  <!-- Optional: load weights and disable online training for stability -->
+  <LoadPretrainedWeights> true </LoadPretrainedWeights>
+  <TrainOnline> false </TrainOnline>
 
-  <!-- Save features for analysis -->
-  <SaveFeatures> true </SaveFeatures>
-
-  <!-- Apply trigger decision -->
-  <ApplyTrigger> true </ApplyTrigger>
+  <!-- Optional: size of rolling calibration buffer -->
+  <CalibrationBuffer> 6000 </CalibrationBuffer>
 
 </PhotonTriggerML>
 
