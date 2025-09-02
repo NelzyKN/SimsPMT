@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="iso-8859-1"?>
 
-<!-- Configuration of PhotonTriggerML Module (calibrated version) -->
+<!-- Configuration of PhotonTriggerML Module (classic format) -->
 
 <PhotonTriggerML>
 
@@ -8,18 +8,17 @@
   <EnergyMin unit="eV"> 1e18 </EnergyMin>
   <EnergyMax unit="eV"> 1e19 </EnergyMax>
 
-  <!-- Base threshold (auto-updated by the module using MCC scan) -->
-  <PhotonThreshold> 0.72 </PhotonThreshold>
+  <!-- Baseline neural-network threshold (used as "BaseThreshold" in summary) -->
+  <PhotonThreshold> 0.80 </PhotonThreshold>
 
-  <!-- Inference output -->
-  <OutputFile> photon_trigger_ml.root </OutputFile>
+  <!-- Output ROOT file for trees/histograms -->
+  <OutputFile> photon_trigger_ml_physics.root </OutputFile>
 
-  <!-- Optional: load weights and disable online training for stability -->
-  <LoadPretrainedWeights> true </LoadPretrainedWeights>
-  <TrainOnline> false </TrainOnline>
+  <!-- Toggle saving the feature tree (already enabled in .cc) -->
+  <SaveFeatures> true </SaveFeatures>
 
-  <!-- Optional: size of rolling calibration buffer -->
-  <CalibrationBuffer> 6000 </CalibrationBuffer>
+  <!-- Apply trigger decision (kept for compatibility with framework) -->
+  <ApplyTrigger> true </ApplyTrigger>
 
 </PhotonTriggerML>
 
