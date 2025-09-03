@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="iso-8859-1"?>
 
-<!-- Configuration of PhotonTriggerML Module -->
+<!-- Configuration of PhotonTriggerML Module (kept simple/compatible) -->
 
 <PhotonTriggerML>
 
@@ -8,16 +8,14 @@
   <EnergyMin unit="eV"> 1e18 </EnergyMin>
   <EnergyMax unit="eV"> 1e19 </EnergyMax>
 
-  <!-- Neural Network threshold for photon classification -->
+  <!-- Neural Network threshold for photon classification (base; auto-tuned slightly during run) -->
   <PhotonThreshold> 0.65 </PhotonThreshold>
 
-  <!-- Output file -->
-  <OutputFile> photon_trigger_ml.root </OutputFile>
+  <!-- Output ROOT file name -->
+  <OutputFile> photon_trigger_ml_physics.root </OutputFile>
 
-  <!-- Save features for analysis -->
+  <!-- Keep behavior consistent with previous runs -->
   <SaveFeatures> true </SaveFeatures>
-
-  <!-- Apply trigger decision -->
   <ApplyTrigger> true </ApplyTrigger>
 
 </PhotonTriggerML>
