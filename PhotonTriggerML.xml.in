@@ -1,20 +1,22 @@
 <?xml version="1.0" encoding="iso-8859-1"?>
 
-<!-- Configuration of PhotonTriggerML Module (kept simple/compatible) -->
-
+<!-- Configuration of PhotonTriggerML Module -->
 <PhotonTriggerML>
 
-  <!-- Energy range for trigger application -->
+  <!-- Energy range where we evaluate stations -->
   <EnergyMin unit="eV"> 1e18 </EnergyMin>
   <EnergyMax unit="eV"> 1e19 </EnergyMax>
 
-  <!-- Neural Network threshold for photon classification (base; auto-tuned slightly during run) -->
-  <PhotonThreshold> 0.65 </PhotonThreshold>
+  <!-- Base threshold before auto-calibration (kept for logging & startup) -->
+  <PhotonThreshold> 0.60 </PhotonThreshold>
 
   <!-- Output ROOT file name -->
   <OutputFile> photon_trigger_ml_physics.root </OutputFile>
 
-  <!-- Keep behavior consistent with previous runs -->
+  <!-- Whether to load weights if present -->
+  <LoadPretrainedWeights> true </LoadPretrainedWeights>
+
+  <!-- Keep logging & diagnostics on -->
   <SaveFeatures> true </SaveFeatures>
   <ApplyTrigger> true </ApplyTrigger>
 
