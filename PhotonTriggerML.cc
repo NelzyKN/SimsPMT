@@ -33,7 +33,11 @@
 #include <iomanip>
 #include <ctime>
 #include <random>
+#include <limits>
 
+// ------------------------------------
+// namespaces
+// ------------------------------------
 using namespace std;
 using namespace fwk;
 using namespace evt;
@@ -61,8 +65,11 @@ static void PhotonTriggerMLSignalHandler(int sig)
   }
 }
 
+// Small helper to avoid -Wmisleading-indentation when clamping
+static inline double clamp01(double s){ if (s<0.0) return 0.0; if (s>1.0) return 1.0; return s; }
+
 // ============================================================================
-// Tiny feed-forward NN (unchanged architecture, safer I/O formatting)
+// Tiny feed-forward NN
 // ============================================================================
 PhotonTriggerML::NeuralNetwork::NeuralNetwork() :
   fInputSize(0), fHidden1Size(0), fHidden2Size(0),
@@ -229,7 +236,7 @@ bool PhotonTriggerML::NeuralNetwork::LoadWeights(const std::string& fn)
 void PhotonTriggerML::NeuralNetwork::QuantizeWeights() { fIsQuantized=true; }
 
 // ============================================================================
-// Extra diagnostics accumulators (no header change, file-scope statics)
+// Diagnostics accumulators & adjustments (file-scope, no header changes)
 // ============================================================================
 namespace {
   struct Accum {
@@ -242,8 +249,14 @@ namespace {
   };
   static Accum gPhoton, gHadron;
   static std::vector<double> gScorePhoton, gScoreHadron;
+
+  // store physics adjustment used at inference time, so validation threshold
+  // calibration uses IDENTICAL pipeline
+  static std::vector<double> gTrainAdj;
+  static std::vector<double> gValAdj;
 }
 
+// helper to export raw feature vector (not normalized)
 static inline std::vector<double> FeaturesRawVector(const PhotonTriggerML::EnhancedFeatures& F)
 {
   std::vector<double> raw;
@@ -266,6 +279,31 @@ static inline std::vector<double> FeaturesRawVector(const PhotonTriggerML::Enhan
   raw.push_back((double)F.num_peaks);
   raw.push_back(F.secondary_peak_ratio);
   return raw;
+}
+
+// Physics-based score adjustment (small, both positive & negative)
+static inline double ScoreAdjustment(const PhotonTriggerML::EnhancedFeatures& F)
+{
+  double adj = 0.0;
+
+  // Approximate TOT at 10%: rise(10->90) + fall(90->10) ~ span under 10% level
+  const double TOT10_est = F.risetime_10_90 + F.falltime_90_10;
+
+  // Hadron-ish penalties (muon spikes, long tails)
+  if (F.pulse_width < 120.0 && F.peak_charge_ratio > 0.35) adj -= 0.10;
+  if (F.num_peaks <= 2 && F.secondary_peak_ratio > 0.60)  adj -= 0.05;
+  if (TOT10_est >= 360.0)                                  adj -= 0.06;
+
+  // Photon-ish bonus (tight, single-peaked, early-biased)
+  if (F.risetime_10_90 < 140.0 &&
+      F.pulse_width     < 250.0 &&
+      F.secondary_peak_ratio < 0.25 &&
+      F.peak_charge_ratio    > 0.18 &&
+      F.late_fraction        < 0.28) {
+    adj += 0.06;
+  }
+
+  return adj;
 }
 
 // ============================================================================
@@ -373,6 +411,7 @@ VModule::ResultFlag PhotonTriggerML::Init()
   // diagnostics buffers
   gPhoton.reset(); gHadron.reset();
   gScorePhoton.clear(); gScoreHadron.clear();
+  gTrainAdj.clear(); gValAdj.clear();
 
   return eSuccess;
 }
@@ -489,28 +528,30 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& st)
     std::vector<double> x = NormalizeFeatures(fFeatures);
     if (x.size()>=17){ x[1]*=2.0; x[3]*=2.0; x[7]*=1.5; x[16]*=1.5; }
 
-    double score = fNeuralNetwork->Predict(x, false);
+    double ml = fNeuralNetwork->Predict(x, false);
+    const double adj = ScoreAdjustment(fFeatures);
 
-    // milder spike penalty
-    double penalty = 0.0;
-    if (fFeatures.pulse_width < 120.0 && fFeatures.peak_charge_ratio>0.35) penalty -= 0.10;
-    if (fFeatures.num_peaks<=2 && fFeatures.secondary_peak_ratio>0.60)    penalty -= 0.05;
-
-    fPhotonScore = std::max(0.0, std::min(1.0, score+penalty));
+    fPhotonScore = clamp01(ml + adj);
     fConfidence  = std::fabs(fPhotonScore - 0.5);
 
-    // training buffers
+    // training buffers (store adj so validation sweep matches inference)
     const bool isValidation = (fStationCount%10==0);
     if (fIsTraining) {
       if (!isValidation) {
         if (fIsActualPhoton) {
           static std::mt19937 g(1234567u);
           std::normal_distribution<> n(0,0.02);
-          for (int k=0;k<2;++k){ std::vector<double> v=x; for (double& z: v) z+=n(g); fTrainingFeatures.push_back(v); fTrainingLabels.push_back(1); }
-        } else { fTrainingFeatures.push_back(x); fTrainingLabels.push_back(0); }
+          for (int k=0;k<2;++k){
+            std::vector<double> v=x; for (double& z: v) z+=n(g);
+            fTrainingFeatures.push_back(v); fTrainingLabels.push_back(1); gTrainAdj.push_back(adj);
+          }
+        } else {
+          fTrainingFeatures.push_back(x); fTrainingLabels.push_back(0); gTrainAdj.push_back(adj);
+        }
       } else {
         fValidationFeatures.push_back(x);
         fValidationLabels.push_back(fIsActualPhoton ? 1 : 0);
+        gValAdj.push_back(adj);
       }
     }
 
@@ -745,7 +786,7 @@ std::vector<double> PhotonTriggerML::NormalizeFeatures(const EnhancedFeatures& F
   std::vector<double> z; z.reserve(raw.size());
   for (size_t i=0;i<raw.size();++i){
     double v = (raw[i]-mn[i])/(mx[i]-mn[i]+1e-3);
-    v = std::max(0.0, std::min(1.0, v));   // clamp to [0,1] (avoids misleading-indentation warnings)
+    v = std::max(0.0, std::min(1.0, v));
     z.push_back(v);
   }
   return z;
@@ -775,66 +816,73 @@ double PhotonTriggerML::TrainNetwork()
   const double train_loss = total/10.0;
   std::cout<<" Loss: "<<std::fixed<<std::setprecision(4)<<train_loss;
 
-  // validation + threshold sweep
+  // validation + threshold sweep (USE final score = ml + stored adj)
   double vloss = 0.0;
   if (!fValidationFeatures.empty()) {
     const int N = (int)fValidationFeatures.size();
-    std::vector<double> preds(N,0.0);
-    for (int i=0;i<N;++i) preds[i] = fNeuralNetwork->Predict(fValidationFeatures[i], false);
+    std::vector<double> ml(N,0.0), scr(N,0.0);
+    for (int i=0;i<N;++i) {
+      ml[i] = fNeuralNetwork->Predict(fValidationFeatures[i], false);
+      const double adj = (i<(int)gValAdj.size()? gValAdj[i] : 0.0);
+      scr[i] = clamp01(ml[i] + adj);
+    }
 
     int correct=0;
     for (int i=0;i<N;++i){
       const int y = fValidationLabels[i];
-      const double p = preds[i];
-      vloss -= y*std::log(p+1e-7) + (1-y)*std::log(1-p+1e-7);
-      const int yhat = (p>fPhotonThreshold)?1:0;
+      vloss -= y*std::log(ml[i]+1e-7) + (1-y)*std::log(1-ml[i]+1e-7); // loss on NN output
+      const int yhat = (scr[i]>fPhotonThreshold)?1:0;                  // accuracy at current threshold
       if (yhat==y) correct++;
     }
     vloss/=N;
     const double vacc = 100.0*correct/N;
     std::cout<<" Val: "<<vloss<<" (Acc: "<<vacc<<"%)";
 
-    // Primary sweep: F1 in [0.35,0.85] to avoid extremes
-    double bestF1=-1.0, bestThr=fPhotonThreshold;
-    int    bestTP=0;
-    auto sweepEval = [&](double thr, int& TP, int& FP, int& TN, int& FN){
-      TP=FP=TN=FN=0;
+    // sweep thresholds to maximize MCC first, then F1, then BA
+    auto evalAt = [&](double thr, double& mcc, double& f1, double& ba){
+      int TP=0, FP=0, TN=0, FN=0;
       for (int i=0;i<N;++i){
         const int y = fValidationLabels[i];
-        const int yhat = (preds[i]>thr)?1:0;
+        const int yhat = (scr[i]>thr)?1:0;
         if (yhat==1 && y==1) TP++; else if (yhat==1 && y==0) FP++;
         else if (yhat==0 && y==0) TN++; else FN++;
       }
-      const double prec = (TP+FP>0)? double(TP)/(TP+FP) : 0.0;
-      const double rec  = (TP+FN>0)? double(TP)/(TP+FN) : 0.0;
-      const double F1   = (prec+rec>0)? 2.0*prec*rec/(prec+rec) : 0.0;
-      return F1;
+      const double Pp = TP+FP;  // predicted positives
+      const double prec = (Pp>0)? (double)TP/Pp : 0.0;
+      const double rec  = (TP+FN>0)? (double)TP/(TP+FN) : 0.0;
+      f1 = (prec+rec>0)? 2.0*prec*rec/(prec+rec) : 0.0;
+      const double tpr = (TP+FN>0)? (double)TP/(TP+FN) : 0.0;
+      const double tnr = (TN+FP>0)? (double)TN/(TN+FP) : 0.0;
+      ba = 0.5*(tpr+tnr);
+      const double denom = std::sqrt((double)(TP+FP)*(TP+FN)*(TN+FP)*(TN+FN));
+      mcc = (denom>0)? ((double)TP*TN - (double)FP*FN)/denom : 0.0;
     };
 
-    double bestPrec=0.0, bestPrecThr=fPhotonThreshold;
+    double bestThr = fPhotonThreshold, bestMCC=-1e-9, bestF1=-1e-9, bestBA=-1e-9;
     for (double thr=0.35; thr<=0.85+1e-9; thr+=0.01){
-      int TP,FP,TN,FN; const double F1 = sweepEval(thr,TP,FP,TN,FN);
-      if (F1>bestF1){ bestF1=F1; bestThr=thr; bestTP=TP; }
-      const double prec = (TP+FP>0)? double(TP)/(TP+FP) : 0.0;
-      if (TP>0 && prec>bestPrec){ bestPrec=prec; bestPrecThr=thr; }
+      double mcc,f1,ba; evalAt(thr,mcc,f1,ba);
+      if (mcc > bestMCC + 1e-12 ||
+         (std::fabs(mcc-bestMCC)<1e-12 && f1>bestF1+1e-12) ||
+         (std::fabs(mcc-bestMCC)<1e-12 && std::fabs(f1-bestF1)<1e-12 && ba>bestBA)) {
+        bestMCC=mcc; bestF1=f1; bestBA=ba; bestThr=thr;
+      }
     }
 
-    // Fallbacks if sweep yields no TP at any threshold
-    bool usedFallback = false;
-    if (bestTP==0) {
-      double mx = 0.0; for (double p: preds) if (p>mx) mx=p;
-      double thrFallback = std::min(0.85, std::max(0.35, mx-1e-4));
-      int TP,FP,TN,FN; (void)sweepEval(thrFallback,TP,FP,TN,FN);
-      if (TP>0) { bestThr=thrFallback; bestTP=TP; usedFallback=true; }
-      else if (bestPrec>0.0) { bestThr=bestPrecThr; usedFallback=true; }
+    // Fallback: if all MCC/F1 are ~0 (no TPs), push threshold toward top scores to force some recall
+    bool usedFallback=false;
+    if (bestF1<=0.0 && bestMCC<=0.0) {
+      double mx=0.0; for (double s: scr) if (s>mx) mx=s;
+      double thrFallback = std::min(0.90, std::max(0.35, mx-1e-4));
+      bestThr = thrFallback; usedFallback = true;
     }
 
     const double old = fPhotonThreshold;
     fPhotonThreshold = 0.8*fPhotonThreshold + 0.2*bestThr; // gentle move
 
     if (fLogFile.is_open()) {
-      fLogFile << "[Calibrator] N="<<N<<"  bestF1="<<bestF1<<" at thr="<<bestThr
-               << " | usedFallback="<<(usedFallback?"yes":"no")
+      fLogFile << "[Calibrator] N="<<N
+               << " bestMCC="<<bestMCC<<" bestF1="<<bestF1<<" bestBA="<<bestBA
+               << " thr*="<<bestThr<<" fallback="<<(usedFallback?"yes":"no")
                << " | updated Thr: "<<old<<" -> "<<fPhotonThreshold<<"\n";
       fLogFile.flush();
     }
@@ -845,10 +893,13 @@ double PhotonTriggerML::TrainNetwork()
 
   std::cout<<"\n";
 
-  // FIFO training window
+  // FIFO training window (also trim stored adjustments)
   if (fTrainingFeatures.size()>1000){
-    fTrainingFeatures.erase(fTrainingFeatures.begin(), fTrainingFeatures.begin()+200);
-    fTrainingLabels.erase(fTrainingLabels.begin(), fTrainingLabels.begin()+200);
+    size_t cut = std::min<size_t>(200, fTrainingFeatures.size());
+    fTrainingFeatures.erase(fTrainingFeatures.begin(), fTrainingFeatures.begin()+cut);
+    fTrainingLabels.erase(fTrainingLabels.begin(),  fTrainingLabels.begin()+cut);
+    if (gTrainAdj.size()>=cut) gTrainAdj.erase(gTrainAdj.begin(), gTrainAdj.begin()+cut);
+    else gTrainAdj.clear();
   }
   fTrainingStep++;
   return vloss;
@@ -1002,7 +1053,7 @@ void PhotonTriggerML::SaveAndDisplaySummary()
     }
   }
 
-  // NEW: per-feature stats by actual class
+  // NEW: per-feature stats by actual class + Cohen's d
   {
     const char* names[17] = {"rise10_50","rise10_90","fall90_10","fwhm","asym",
                              "peak_amp","total_q","peak_q_ratio","smooth","kurt",
@@ -1048,6 +1099,15 @@ void PhotonTriggerML::SaveAndDisplaySummary()
     for (size_t k=0;k<std::min<size_t>(5,items.size());++k) {
       std::cout << "  - " << items[k].name << "  |d|=" << std::setprecision(3) << items[k].d << "\n";
     }
+
+    if (fLogFile.is_open()) {
+      fLogFile << "Top discriminators (|d|): ";
+      for (size_t k=0;k<std::min<size_t>(5,items.size());++k) {
+        fLogFile << items[k].name << "("<<items[k].d<<") ";
+      }
+      fLogFile << "\n";
+      fLogFile.flush();
+    }
   }
 
   // NEW: score quantiles by class
@@ -1077,14 +1137,16 @@ void PhotonTriggerML::SaveAndDisplaySummary()
       if (!h) return false;
       const int n=h->GetNbinsX();
       if (n<=0) return false;
-      std::vector<double> tr(n); for (int i=1;i<=n;++i) tr[i-1]=h->GetBinContent(i);
+
+      std::vector<double> tr(n);
+      for (int i=1;i<=n;++i) tr[i-1]=h->GetBinContent(i);
+
       auto F = ExtractEnhancedFeatures(tr); auto X = NormalizeFeatures(F);
       if (X.size()>=17){ X[1]*=2.0; X[3]*=2.0; X[7]*=1.5; X[16]*=1.5; }
       double ml = fNeuralNetwork->Predict(X,false);
-      double penalty=0.0;
-      if (F.pulse_width<120.0 && F.peak_charge_ratio>0.35) penalty-=0.10;
-      if (F.num_peaks<=2 && F.secondary_peak_ratio>0.60)  penalty-=0.05;
-      s = std::max(0.0, std::min(1.0, ml+penalty));
+      double adj = ScoreAdjustment(F);
+
+      s = clamp01(ml + adj);
       photon = (s>fPhotonThreshold);
       return true;
     };
@@ -1106,7 +1168,12 @@ void PhotonTriggerML::SaveAndDisplaySummary()
           }
         } else if (o->InheritsFrom(TCanvas::Class())) {
           TCanvas* c=(TCanvas*)o; TH1* h=nullptr;
-          if (TList* P=c->GetListOfPrimitives()){ TIter ny(P); while (TObject* q=ny()){ if (q->InheritsFrom(TH1::Class())){ h=(TH1*)q; break; } } }
+          if (TList* P=c->GetListOfPrimitives()){
+            TIter ny(P);
+            while (TObject* q=ny()){
+              if (q->InheritsFrom(TH1::Class())){ h=(TH1*)q; break; }
+            }
+          }
           if (h){
             double sc=0; bool ph=false;
             if (rescore(h,sc,ph)) {
