@@ -19,13 +19,7 @@
 #include <TTree.h>
 #include <TH1D.h>
 #include <TH2D.h>
-#include <TGraph.h>
-#include <TMath.h>
-#include <TRandom3.h>
 #include <TCanvas.h>
-#include <TStyle.h>
-#include <TPaveText.h>
-#include <TLegend.h>
 #include <TDirectory.h>
 #include <TKey.h>
 
@@ -46,7 +40,7 @@ using namespace evt;
 using namespace det;
 
 // ============================================================================
-// Static globals for signal handling
+// Globals for signal-safe summary
 // ============================================================================
 PhotonTriggerML* PhotonTriggerML::fInstance = 0;
 std::map<int, PhotonTriggerML::MLResult> PhotonTriggerML::fMLResultsMap;
@@ -59,7 +53,7 @@ static void PhotonTriggerMLSignalHandler(int sig)
     gCalledFromSignal = 1;
     if (PhotonTriggerML::fInstance) {
       try { PhotonTriggerML::fInstance->SaveAndDisplaySummary(); }
-      catch (...) { /* swallow */ }
+      catch (...) { /* swallow to guarantee termination */ }
     }
     std::signal(sig, SIG_DFL);
     std::raise(sig);
@@ -68,7 +62,7 @@ static void PhotonTriggerMLSignalHandler(int sig)
 }
 
 // ============================================================================
-// Tiny feed-forward NN
+// Tiny feed-forward NN (unchanged architecture, safer I/O formatting)
 // ============================================================================
 PhotonTriggerML::NeuralNetwork::NeuralNetwork() :
   fInputSize(0), fHidden1Size(0), fHidden2Size(0),
@@ -154,79 +148,40 @@ double PhotonTriggerML::NeuralNetwork::Train(const std::vector<std::vector<doubl
     const int    t = y[n];
     const double w = (t==1? wP : wH);
 
-    // fwd
+    // forward
     std::vector<double> h1r(fHidden1Size), h2r(fHidden2Size), h1(fHidden1Size), h2(fHidden2Size);
-    for (int i=0;i<fHidden1Size;++i) {
-      double s=fBias1[i]; for (int j=0;j<fInputSize;++j) s+=fWeights1[i][j]*x[j];
-      h1r[i]=s; h1[i]=1.0/(1.0+std::exp(-s));
-    }
-    for (int i=0;i<fHidden2Size;++i) {
-      double s=fBias2[i]; for (int j=0;j<fHidden1Size;++j) s+=fWeights2[i][j]*h1[j];
-      h2r[i]=s; h2[i]=1.0/(1.0+std::exp(-s));
-    }
+    for (int i=0;i<fHidden1Size;++i) { double s=fBias1[i]; for (int j=0;j<fInputSize;++j) s+=fWeights1[i][j]*x[j]; h1r[i]=s; h1[i]=1.0/(1.0+std::exp(-s)); }
+    for (int i=0;i<fHidden2Size;++i) { double s=fBias2[i]; for (int j=0;j<fHidden1Size;++j) s+=fWeights2[i][j]*h1[j]; h2r[i]=s; h2[i]=1.0/(1.0+std::exp(-s)); }
     double o=fBias3; for (int j=0;j<fHidden2Size;++j) o+=fWeights3[0][j]*h2[j];
     const double p = 1.0/(1.0+std::exp(-o));
 
-    // CE loss
     total += -w*( t*std::log(p+1e-7) + (1-t)*std::log(1-p+1e-7) );
 
-    // bwd
+    // backward
     const double go = w*(p - t);
-
     for (int j=0;j<fHidden2Size;++j) gw3[0][j] += go*h2[j];
     gb3 += go;
 
     std::vector<double> gh2(fHidden2Size,0);
-    for (int j=0;j<fHidden2Size;++j) {
-      gh2[j] = fWeights3[0][j]*go * h2[j]*(1-h2[j]);
-    }
-    for (int i=0;i<fHidden2Size;++i){
-      for (int j=0;j<fHidden1Size;++j) gw2[i][j]+= gh2[i]*h1[j];
-      gb2[i]+=gh2[i];
-    }
+    for (int j=0;j<fHidden2Size;++j) gh2[j] = fWeights3[0][j]*go * h2[j]*(1-h2[j]);
+    for (int i=0;i<fHidden2Size;++i){ for (int j=0;j<fHidden1Size;++j) gw2[i][j]+= gh2[i]*h1[j]; gb2[i]+=gh2[i]; }
 
     std::vector<double> gh1(fHidden1Size,0);
-    for (int j=0;j<fHidden1Size;++j){
-      double s=0; for (int i=0;i<fHidden2Size;++i) s+=fWeights2[i][j]*gh2[i];
-      gh1[j] = s * h1[j]*(1-h1[j]);
-    }
-    for (int i=0;i<fHidden1Size;++i){
-      for (int j=0;j<fInputSize;++j) gw1[i][j]+= gh1[i]*x[j];
-      gb1[i]+=gh1[i];
-    }
+    for (int j=0;j<fHidden1Size;++j){ double s=0; for (int i=0;i<fHidden2Size;++i) s+=fWeights2[i][j]*gh2[i]; gh1[j] = s * h1[j]*(1-h1[j]); }
+    for (int i=0;i<fHidden1Size;++i){ for (int j=0;j<fInputSize;++j) gw1[i][j]+= gh1[i]*x[j]; gb1[i]+=gh1[i]; }
   }
 
   const double mom=0.9;
   for (int i=0;i<fHidden1Size;++i){
-    for (int j=0;j<fInputSize;++j){
-      const double g = gw1[i][j]/B;
-      fMomentum1_w1[i][j] = mom*fMomentum1_w1[i][j] - lr*g;
-      fWeights1[i][j] += fMomentum1_w1[i][j];
-    }
-    const double g = gb1[i]/B;
-    fMomentum1_b1[i] = mom*fMomentum1_b1[i] - lr*g;
-    fBias1[i]+=fMomentum1_b1[i];
+    for (int j=0;j<fInputSize;++j){ const double g = gw1[i][j]/B; fMomentum1_w1[i][j] = mom*fMomentum1_w1[i][j] - lr*g; fWeights1[i][j] += fMomentum1_w1[i][j]; }
+    { const double g = gb1[i]/B; fMomentum1_b1[i] = mom*fMomentum1_b1[i] - lr*g; fBias1[i]+=fMomentum1_b1[i]; }
   }
   for (int i=0;i<fHidden2Size;++i){
-    for (int j=0;j<fHidden1Size;++j){
-      const double g = gw2[i][j]/B;
-      fMomentum1_w2[i][j] = mom*fMomentum1_w2[i][j] - lr*g;
-      fWeights2[i][j] += fMomentum1_w2[i][j];
-    }
-    const double g = gb2[i]/B;
-    fMomentum1_b2[i] = mom*fMomentum1_b2[i] - lr*g;
-    fBias2[i]+=fMomentum1_b2[i];
+    for (int j=0;j<fHidden1Size;++j){ const double g = gw2[i][j]/B; fMomentum1_w2[i][j] = mom*fMomentum1_w2[i][j] - lr*g; fWeights2[i][j] += fMomentum1_w2[i][j]; }
+    { const double g = gb2[i]/B; fMomentum1_b2[i] = mom*fMomentum1_b2[i] - lr*g; fBias2[i]+=fMomentum1_b2[i]; }
   }
-  for (int j=0;j<fHidden2Size;++j){
-    const double g = gw3[0][j]/B;
-    fMomentum1_w3[0][j] = mom*fMomentum1_w3[0][j] - lr*g;
-    fWeights3[0][j] += fMomentum1_w3[0][j];
-  }
-  {
-    const double g = gb3/B;
-    fMomentum1_b3 = mom*fMomentum1_b3 - lr*g;
-    fBias3 += fMomentum1_b3;
-  }
+  for (int j=0;j<fHidden2Size;++j){ const double g = gw3[0][j]/B; fMomentum1_w3[0][j] = mom*fMomentum1_w3[0][j] - lr*g; fWeights3[0][j] += fMomentum1_w3[0][j]; }
+  { const double g = gb3/B; fMomentum1_b3 = mom*fMomentum1_b3 - lr*g; fBias3 += fMomentum1_b3; }
 
   return total/B;
 }
@@ -274,6 +229,46 @@ bool PhotonTriggerML::NeuralNetwork::LoadWeights(const std::string& fn)
 void PhotonTriggerML::NeuralNetwork::QuantizeWeights() { fIsQuantized=true; }
 
 // ============================================================================
+// Extra diagnostics accumulators (no header change, file-scope statics)
+// ============================================================================
+namespace {
+  struct Accum {
+    double sum[17], sum2[17], mn[17], mx[17]; long long n;
+    Accum(){ reset(); }
+    void reset(){ n=0; for (int i=0;i<17;++i){ sum[i]=sum2[i]=0; mn[i]=+1e300; mx[i]=-1e300; } }
+    void push(const std::vector<double>& v){
+      n++; for (int i=0;i<17;++i){ const double x=v[i]; sum[i]+=x; sum2[i]+=x*x; if (x<mn[i]) mn[i]=x; if (x>mx[i]) mx[i]=x; }
+    }
+  };
+  static Accum gPhoton, gHadron;
+  static std::vector<double> gScorePhoton, gScoreHadron;
+}
+
+static inline std::vector<double> FeaturesRawVector(const PhotonTriggerML::EnhancedFeatures& F)
+{
+  std::vector<double> raw;
+  raw.reserve(17);
+  raw.push_back(F.risetime_10_50);
+  raw.push_back(F.risetime_10_90);
+  raw.push_back(F.falltime_90_10);
+  raw.push_back(F.pulse_width);
+  raw.push_back(F.asymmetry);
+  raw.push_back(F.peak_amplitude);
+  raw.push_back(F.total_charge);
+  raw.push_back(F.peak_charge_ratio);
+  raw.push_back(F.smoothness);
+  raw.push_back(F.kurtosis);
+  raw.push_back(F.skewness);
+  raw.push_back(F.early_fraction);
+  raw.push_back(F.late_fraction);
+  raw.push_back(F.time_spread);
+  raw.push_back(F.high_freq_content);
+  raw.push_back((double)F.num_peaks);
+  raw.push_back(F.secondary_peak_ratio);
+  return raw;
+}
+
+// ============================================================================
 // Module lifecycle
 // ============================================================================
 PhotonTriggerML::PhotonTriggerML() :
@@ -312,11 +307,12 @@ PhotonTriggerML::PhotonTriggerML() :
   fFeatureStdDevs.assign(17, 1.0);
 }
 
-PhotonTriggerML::~PhotonTriggerML() {}
+PhotonTriggerML::~PhotonTriggerML(){}
 
 VModule::ResultFlag PhotonTriggerML::Init()
 {
   INFO("PhotonTriggerML::Init()");
+
   // log
   fLogFile.open(fLogFileName.c_str());
   if (!fLogFile.is_open()) { ERROR("Cannot open log file"); return eFailure; }
@@ -348,7 +344,7 @@ VModule::ResultFlag PhotonTriggerML::Init()
   fMLTree->Branch("primaryType",&fPrimaryType);
   fMLTree->Branch("isActualPhoton",&fIsActualPhoton,"isActualPhoton/O");
 
-  // hists
+  // histograms
   hPhotonScore = new TH1D("hPhotonScore","Score(all);score;count",50,0,1);
   hPhotonScorePhotons = new TH1D("hPhotonScorePhotons","Score(true photons);score;count",50,0,1);
   hPhotonScorePhotons->SetLineColor(kBlue);
@@ -374,11 +370,15 @@ VModule::ResultFlag PhotonTriggerML::Init()
   std::signal(SIGINT,  PhotonTriggerMLSignalHandler);
   std::signal(SIGTSTP, PhotonTriggerMLSignalHandler);
 
+  // diagnostics buffers
+  gPhoton.reset(); gHadron.reset();
+  gScorePhoton.clear(); gScoreHadron.clear();
+
   return eSuccess;
 }
 
 // ============================================================================
-// Processing
+// Event processing
 // ============================================================================
 VModule::ResultFlag PhotonTriggerML::Run(Event& event)
 {
@@ -419,7 +419,7 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
     }
   }
 
-  // update displays & cm
+  // periodic metrics & confusion
   if (fEventCount%10==0) {
     CalculateAndDisplayMetrics();
     hConfusionMatrix->SetBinContent(1,1, fTrueNegatives);
@@ -428,7 +428,7 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
     hConfusionMatrix->SetBinContent(2,2, fTruePositives);
   }
 
-  // lightweight training & validation
+  // on-the-fly training with validation threshold calibration
   if (fIsTraining && fTrainingFeatures.size()>=20 && fEventCount%5==0) {
     const double vloss = TrainNetwork();
     const int step = fEventCount/5;
@@ -453,7 +453,7 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& st)
 {
   fStationId = st.GetId();
 
-  // station position & distance to core
+  // distance to core
   try {
     const Detector& det = Detector::GetInstance();
     const sdet::SDetector& sdetector = det.GetSDetector();
@@ -462,10 +462,7 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& st)
     const double sx = dst.GetPosition().GetX(site);
     const double sy = dst.GetPosition().GetY(site);
     fDistance = std::sqrt((sx-fCoreX)*(sx-fCoreX) + (sy-fCoreY)*(sy-fCoreY));
-  } catch (...) {
-    fDistance = -1.0;
-    return;
-  }
+  } catch (...) { fDistance=-1.0; return; }
 
   const int firstPMT = sdet::Station::GetFirstPMTId();
   for (int p=0;p<3;++p) {
@@ -477,58 +474,40 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& st)
     if (!ExtractTraceData(pmt, trace)) continue;
     if ((int)trace.size()!=2048) continue;
 
-    // quick amplitude check
-    const auto minmax = std::minmax_element(trace.begin(), trace.end());
-    if ((*minmax.second - *minmax.first) < 10.0) continue;
+    const auto mm = std::minmax_element(trace.begin(), trace.end());
+    if ((*mm.second - *mm.first) < 10.0) continue;
 
-    // feature extraction
     fFeatures = ExtractEnhancedFeatures(trace);
 
-    // basic physics tag (for debugging only)
-    const bool physicsPhotonLike =
-      (fFeatures.risetime_10_90 < 150.0) &&
-      (fFeatures.pulse_width     < 300.0) &&
-      (fFeatures.secondary_peak_ratio < 0.30) &&
-      (fFeatures.peak_charge_ratio    > 0.15);
-
-    // book-keeping hists
+    // bookkeeping hists & stats
     hRisetime->Fill(fFeatures.risetime_10_90);
     hAsymmetry->Fill(fFeatures.asymmetry);
     hKurtosis->Fill(fFeatures.kurtosis);
     UpdateFeatureStatistics(fFeatures);
 
-    // normalization
+    // normalize + physic emphasis
     std::vector<double> x = NormalizeFeatures(fFeatures);
-    // emphasize a few
-    if (x.size()>=17){
-      x[1]*=2.0; x[3]*=2.0; x[7]*=1.5; x[16]*=1.5;
-    }
+    if (x.size()>=17){ x[1]*=2.0; x[3]*=2.0; x[7]*=1.5; x[16]*=1.5; }
 
     double score = fNeuralNetwork->Predict(x, false);
 
-    // light "muon spike" penalty to lift precision
+    // milder spike penalty
     double penalty = 0.0;
-    if (fFeatures.pulse_width < 120.0 && fFeatures.peak_charge_ratio>0.35) penalty -= 0.20;
-    if (fFeatures.num_peaks<=2 && fFeatures.secondary_peak_ratio>0.60)    penalty -= 0.10;
+    if (fFeatures.pulse_width < 120.0 && fFeatures.peak_charge_ratio>0.35) penalty -= 0.10;
+    if (fFeatures.num_peaks<=2 && fFeatures.secondary_peak_ratio>0.60)    penalty -= 0.05;
 
     fPhotonScore = std::max(0.0, std::min(1.0, score+penalty));
     fConfidence  = std::fabs(fPhotonScore - 0.5);
 
-    // training/validation buffers
+    // training buffers
     const bool isValidation = (fStationCount%10==0);
     if (fIsTraining) {
       if (!isValidation) {
-        // modest oversample true photons
         if (fIsActualPhoton) {
           static std::mt19937 g(1234567u);
           std::normal_distribution<> n(0,0.02);
-          for (int k=0;k<2;++k){
-            std::vector<double> v=x; for (double& z: v) z+=n(g);
-            fTrainingFeatures.push_back(v); fTrainingLabels.push_back(1);
-          }
-        } else {
-          fTrainingFeatures.push_back(x); fTrainingLabels.push_back(0);
-        }
+          for (int k=0;k<2;++k){ std::vector<double> v=x; for (double& z: v) z+=n(g); fTrainingFeatures.push_back(v); fTrainingLabels.push_back(1); }
+        } else { fTrainingFeatures.push_back(x); fTrainingLabels.push_back(0); }
       } else {
         fValidationFeatures.push_back(x);
         fValidationLabels.push_back(fIsActualPhoton ? 1 : 0);
@@ -536,15 +515,16 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& st)
     }
 
     fStationCount++;
-    const bool isPhoton = (fPhotonScore > fPhotonThreshold);
+    const bool predPhoton = (fPhotonScore > fPhotonThreshold);
 
-    // ML result map (per station id)
-    MLResult r; r.photonScore=fPhotonScore; r.identifiedAsPhoton=isPhoton;
+    // per-station result
+    MLResult r; r.photonScore=fPhotonScore; r.identifiedAsPhoton=predPhoton;
     r.isActualPhoton=fIsActualPhoton; r.vemCharge=fFeatures.total_charge;
     r.features=fFeatures; r.primaryType=fPrimaryType; r.confidence=fConfidence;
     fMLResultsMap[fStationId]=r;
 
-    if (isPhoton) {
+    // confusion counters
+    if (predPhoton) {
       fPhotonLikeCount++;
       if (fIsActualPhoton) fTruePositives++; else fFalsePositives++;
     } else {
@@ -552,34 +532,43 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& st)
       if (!fIsActualPhoton) fTrueNegatives++; else fFalseNegatives++;
     }
 
-    // fill hists & tree
+    // hists
     hPhotonScore->Fill(fPhotonScore);
-    if (fIsActualPhoton) hPhotonScorePhotons->Fill(fPhotonScore);
-    else                hPhotonScoreHadrons->Fill(fPhotonScore);
+    if (fIsActualPhoton) { hPhotonScorePhotons->Fill(fPhotonScore); gScorePhoton.push_back(fPhotonScore); }
+    else                { hPhotonScoreHadrons->Fill(fPhotonScore); gScoreHadron.push_back(fPhotonScore); }
     hConfidence->Fill(fConfidence);
     hScoreVsEnergy->Fill(fEnergy, fPhotonScore);
     hScoreVsDistance->Fill(fDistance, fPhotonScore);
     fMLTree->Fill();
 
-    // append TSV diagnostics (event,station,label,pred,score,key features)
+    // diagnostics TSV (scores)
     {
       std::ofstream tsv("photon_trigger_scores.tsv", std::ios::app);
       if (tsv.is_open()) {
         tsv<<fEventCount<<"\t"<<fStationId<<"\t"<<(fIsActualPhoton?1:0)<<"\t"
-           <<(isPhoton?1:0)<<"\t"<<std::fixed<<std::setprecision(6)<<fPhotonScore
+           <<(predPhoton?1:0)<<"\t"<<std::fixed<<std::setprecision(6)<<fPhotonScore
            <<"\t"<<fFeatures.risetime_10_90<<"\t"<<fFeatures.pulse_width
            <<"\t"<<fFeatures.peak_charge_ratio<<"\t"<<fFeatures.secondary_peak_ratio
            <<"\t"<<fEnergy<<"\t"<<fDistance<<"\n";
       }
     }
 
-    if ((fIsActualPhoton || physicsPhotonLike) && fStationCount<=100) {
-      std::cout<<"  Station "<<fStationId<<" PMT "<<pid
-               <<": Score="<<std::fixed<<std::setprecision(3)<<fPhotonScore
-               <<"  True="<<fPrimaryType
-               <<"  Rise="<<fFeatures.risetime_10_90<<"ns"
-               <<"  Width="<<fFeatures.pulse_width<<"ns"
-               <<"  PhysTag="<<(physicsPhotonLike?"YES":"NO")<<"\n";
+    // diagnostics TSV (misclassified only)
+    if ((predPhoton && !fIsActualPhoton) || (!predPhoton && fIsActualPhoton)) {
+      std::ofstream m("photon_trigger_misclassified.tsv", std::ios::app);
+      if (m.is_open()) {
+        m<<fEventCount<<"\t"<<fStationId<<"\t"<<(fIsActualPhoton?1:0)<<"\t"
+         <<(predPhoton?1:0)<<"\t"<<std::fixed<<std::setprecision(6)<<fPhotonScore
+         <<"\t"<<fFeatures.risetime_10_90<<"\t"<<fFeatures.pulse_width
+         <<"\t"<<fFeatures.peak_charge_ratio<<"\t"<<fFeatures.secondary_peak_ratio
+         <<"\t"<<fEnergy<<"\t"<<fDistance<<"\n";
+      }
+    }
+
+    // per-class parameter accumulators (actual labels)
+    {
+      const std::vector<double> raw = FeaturesRawVector(fFeatures);
+      if (fIsActualPhoton) gPhoton.push(raw); else gHadron.push(raw);
     }
   } // PMT loop
 }
@@ -592,7 +581,6 @@ bool PhotonTriggerML::ExtractTraceData(const sevt::PMT& pmt, std::vector<double>
   if (pmt.HasFADCTrace()) {
     try {
       const auto& tr = pmt.GetFADCTrace(sdet::PMTConstants::eHighGain);
-      // Auger Trace<int> exposes operator[], not STL iterators/size reliably.
       for (int i=0;i<2048;++i) out.push_back(tr[i]);
       return true;
     } catch (...) {}
@@ -615,7 +603,7 @@ bool PhotonTriggerML::ExtractTraceData(const sevt::PMT& pmt, std::vector<double>
 }
 
 // ============================================================================
-// Features
+// Feature extraction and normalization
 // ============================================================================
 PhotonTriggerML::EnhancedFeatures
 PhotonTriggerML::ExtractEnhancedFeatures(const std::vector<double>& trace, double)
@@ -634,21 +622,17 @@ PhotonTriggerML::ExtractEnhancedFeatures(const std::vector<double>& trace, doubl
   std::vector<double> sig(N,0.0);
   int pk=0; double pv=0, sum=0;
   for (int i=0;i<N;++i){
-    double s = trace[i]-base;
-    if (s<0) s=0;
+    double s = trace[i]-base; if (s<0) s=0;
     sig[i]=s; sum+=s;
     if (s>pv){ pv=s; pk=i; }
   }
-
   if (pv<5.0 || sum<10.0) return f;
 
   f.peak_amplitude   = pv/ADC_PER_VEM;
   f.total_charge     = sum/ADC_PER_VEM;
   f.peak_charge_ratio= f.peak_amplitude / (f.total_charge+1e-3);
 
-  // thresholds
   const double t10 = 0.10*pv, t50=0.50*pv, t90=0.90*pv;
-
   int r10=0, r50=0, r90=pk;
   for (int i=pk;i>=0;--i){
     if (sig[i]<=t90 && r90==pk) r90=i;
@@ -707,10 +691,7 @@ PhotonTriggerML::ExtractEnhancedFeatures(const std::vector<double>& trace, doubl
 
   // high-frequency content
   double hfacc=0;
-  for (int i=1;i<N-1;++i){
-    const double d = sig[i+1]-sig[i-1];
-    hfacc += d*d;
-  }
+  for (int i=1;i<N-1;++i){ const double d = sig[i+1]-sig[i-1]; hfacc += d*d; }
   f.high_freq_content = hfacc / std::max(1e-3, sum*sum);
 
   // peaks (stricter threshold to reduce fake multi-peak)
@@ -764,14 +745,14 @@ std::vector<double> PhotonTriggerML::NormalizeFeatures(const EnhancedFeatures& F
   std::vector<double> z; z.reserve(raw.size());
   for (size_t i=0;i<raw.size();++i){
     double v = (raw[i]-mn[i])/(mx[i]-mn[i]+1e-3);
-    if (v<0) v=0; if (v>1) v=1;
+    v = std::max(0.0, std::min(1.0, v));   // clamp to [0,1] (avoids misleading-indentation warnings)
     z.push_back(v);
   }
   return z;
 }
 
 // ============================================================================
-// Training + validation (with in-scope threshold calibration)
+// Training + validation with robust threshold calibration
 // ============================================================================
 double PhotonTriggerML::TrainNetwork()
 {
@@ -813,28 +794,47 @@ double PhotonTriggerML::TrainNetwork()
     const double vacc = 100.0*correct/N;
     std::cout<<" Val: "<<vloss<<" (Acc: "<<vacc<<"%)";
 
-    // sweep F1 in [0.55,0.85] to avoid extreme thresholds
+    // Primary sweep: F1 in [0.35,0.85] to avoid extremes
     double bestF1=-1.0, bestThr=fPhotonThreshold;
-    for (double thr=0.55; thr<=0.85+1e-9; thr+=0.02){
-      int TP=0,FP=0,TN=0,FN=0;
+    int    bestTP=0;
+    auto sweepEval = [&](double thr, int& TP, int& FP, int& TN, int& FN){
+      TP=FP=TN=FN=0;
       for (int i=0;i<N;++i){
         const int y = fValidationLabels[i];
         const int yhat = (preds[i]>thr)?1:0;
-        if (yhat==1 && y==1) TP++;
-        else if (yhat==1 && y==0) FP++;
-        else if (yhat==0 && y==0) TN++;
-        else FN++;
+        if (yhat==1 && y==1) TP++; else if (yhat==1 && y==0) FP++;
+        else if (yhat==0 && y==0) TN++; else FN++;
       }
       const double prec = (TP+FP>0)? double(TP)/(TP+FP) : 0.0;
       const double rec  = (TP+FN>0)? double(TP)/(TP+FN) : 0.0;
       const double F1   = (prec+rec>0)? 2.0*prec*rec/(prec+rec) : 0.0;
-      if (F1 > bestF1) { bestF1=F1; bestThr=thr; }
+      return F1;
+    };
+
+    double bestPrec=0.0, bestPrecThr=fPhotonThreshold;
+    for (double thr=0.35; thr<=0.85+1e-9; thr+=0.01){
+      int TP,FP,TN,FN; const double F1 = sweepEval(thr,TP,FP,TN,FN);
+      if (F1>bestF1){ bestF1=F1; bestThr=thr; bestTP=TP; }
+      const double prec = (TP+FP>0)? double(TP)/(TP+FP) : 0.0;
+      if (TP>0 && prec>bestPrec){ bestPrec=prec; bestPrecThr=thr; }
+    }
+
+    // Fallbacks if sweep yields no TP at any threshold
+    bool usedFallback = false;
+    if (bestTP==0) {
+      double mx = 0.0; for (double p: preds) if (p>mx) mx=p;
+      double thrFallback = std::min(0.85, std::max(0.35, mx-1e-4));
+      int TP,FP,TN,FN; (void)sweepEval(thrFallback,TP,FP,TN,FN);
+      if (TP>0) { bestThr=thrFallback; bestTP=TP; usedFallback=true; }
+      else if (bestPrec>0.0) { bestThr=bestPrecThr; usedFallback=true; }
     }
 
     const double old = fPhotonThreshold;
     fPhotonThreshold = 0.8*fPhotonThreshold + 0.2*bestThr; // gentle move
+
     if (fLogFile.is_open()) {
       fLogFile << "[Calibrator] N="<<N<<"  bestF1="<<bestF1<<" at thr="<<bestThr
+               << " | usedFallback="<<(usedFallback?"yes":"no")
                << " | updated Thr: "<<old<<" -> "<<fPhotonThreshold<<"\n";
       fLogFile.flush();
     }
@@ -855,7 +855,7 @@ double PhotonTriggerML::TrainNetwork()
 }
 
 // ============================================================================
-// Metrics, summary, finish
+// Metrics, summary, and rich diagnostics dumps
 // ============================================================================
 void PhotonTriggerML::CalculateAndDisplayMetrics()
 {
@@ -886,6 +886,17 @@ void PhotonTriggerML::CalculateAndDisplayMetrics()
              << "% F1: " << f1 << "%\n";
     fLogFile.flush();
   }
+}
+
+static inline double quantile(std::vector<double> v, double q)
+{
+  if (v.empty()) return std::numeric_limits<double>::quiet_NaN();
+  std::sort(v.begin(), v.end());
+  double pos = q*(v.size()-1);
+  size_t i = (size_t)std::floor(pos);
+  size_t j = std::min(i+1, v.size()-1);
+  double frac = pos - i;
+  return (1.0-frac)*v[i] + frac*v[j];
 }
 
 void PhotonTriggerML::CalculatePerformanceMetrics()
@@ -991,20 +1002,88 @@ void PhotonTriggerML::SaveAndDisplaySummary()
     }
   }
 
+  // NEW: per-feature stats by actual class
+  {
+    const char* names[17] = {"rise10_50","rise10_90","fall90_10","fwhm","asym",
+                             "peak_amp","total_q","peak_q_ratio","smooth","kurt",
+                             "skew","early_frac","late_frac","time_spread","hf_content",
+                             "num_peaks","sec_peak_ratio"};
+
+    std::ofstream fs("photon_trigger_feature_stats.tsv");
+    if (fs.is_open()) {
+      fs<<"feature\tphoton_mean\tphoton_std\thadron_mean\thadron_std\tdelta\tcohens_d\n";
+      for (int i=0;i<17;++i){
+        const double nP = (double)std::max<long long>(1, gPhoton.n);
+        const double nH = (double)std::max<long long>(1, gHadron.n);
+        const double muP = gPhoton.sum[i]/nP;
+        const double muH = gHadron.sum[i]/nH;
+        const double vP  = std::max(0.0, gPhoton.sum2[i]/nP - muP*muP);
+        const double vH  = std::max(0.0, gHadron.sum2[i]/nH - muH*muH);
+        const double sP  = std::sqrt(vP);
+        const double sH  = std::sqrt(vH);
+        const double delta = muP - muH;
+        const double sp    = std::sqrt( ((nP-1)*vP + (nH-1)*vH) / std::max(1.0, (nP+nH-2)) );
+        const double d     = (sp>0? delta/sp : 0.0);
+        fs<<names[i]<<"\t"<<muP<<"\t"<<sP<<"\t"<<muH<<"\t"<<sH<<"\t"<<delta<<"\t"<<d<<"\n";
+      }
+      fs.close();
+    }
+
+    // quick console highlight: top 5 discriminators by |d|
+    struct Item { std::string name; double d; };
+    std::vector<Item> items;
+    for (int i=0;i<17;++i){
+      const double nP = (double)std::max<long long>(1, gPhoton.n);
+      const double nH = (double)std::max<long long>(1, gHadron.n);
+      const double muP = gPhoton.sum[i]/nP;
+      const double muH = gHadron.sum[i]/nH;
+      const double vP  = std::max(0.0, gPhoton.sum2[i]/nP - muP*muP);
+      const double vH  = std::max(0.0, gHadron.sum2[i]/nH - muH*muH);
+      const double sp  = std::sqrt( ((nP-1)*vP + (nH-1)*vH) / std::max(1.0, (nP+nH-2)) );
+      double d = 0.0; if (sp>0) d=(muP-muH)/sp;
+      items.push_back({names[i], std::fabs(d)});
+    }
+    std::sort(items.begin(), items.end(), [](const Item&a,const Item&b){return a.d>b.d;});
+    std::cout << "Top 5 parameter discriminators by |Cohen d|:\n";
+    for (size_t k=0;k<std::min<size_t>(5,items.size());++k) {
+      std::cout << "  - " << items[k].name << "  |d|=" << std::setprecision(3) << items[k].d << "\n";
+    }
+  }
+
+  // NEW: score quantiles by class
+  {
+    std::ofstream qf("photon_trigger_score_quantiles.txt");
+    if (qf.is_open()) {
+      auto dump = [&](const std::vector<double>& v, const std::string& name){
+        qf<<name<<": N="<<v.size()<<"\n";
+        if (!v.empty()) {
+          qf<<"  q10="<<quantile(v,0.10)<<"  q25="<<quantile(v,0.25)
+            <<"  q50="<<quantile(v,0.50)<<"  q75="<<quantile(v,0.75)
+            <<"  q90="<<quantile(v,0.90)<<"\n";
+        }
+      };
+      dump(gScorePhoton, "photons");
+      dump(gScoreHadron, "hadrons");
+      qf.close();
+    }
+  }
+
   // do not touch external trace files if Ctrl+C
   if (!gCalledFromSignal) {
     auto strip = [](const std::string& t)->std::string{
       size_t p=t.find(" [ML:"); return (p==std::string::npos)? t : t.substr(0,p);
     };
     auto rescore = [this](TH1* h, double& s, bool& photon)->bool{
-      if (!h) return false; const int n=h->GetNbinsX(); if (n<=0) return false;
+      if (!h) return false;
+      const int n=h->GetNbinsX();
+      if (n<=0) return false;
       std::vector<double> tr(n); for (int i=1;i<=n;++i) tr[i-1]=h->GetBinContent(i);
       auto F = ExtractEnhancedFeatures(tr); auto X = NormalizeFeatures(F);
       if (X.size()>=17){ X[1]*=2.0; X[3]*=2.0; X[7]*=1.5; X[16]*=1.5; }
       double ml = fNeuralNetwork->Predict(X,false);
       double penalty=0.0;
-      if (F.pulse_width<120.0 && F.peak_charge_ratio>0.35) penalty-=0.20;
-      if (F.num_peaks<=2 && F.secondary_peak_ratio>0.60)  penalty-=0.10;
+      if (F.pulse_width<120.0 && F.peak_charge_ratio>0.35) penalty-=0.10;
+      if (F.num_peaks<=2 && F.secondary_peak_ratio>0.60)  penalty-=0.05;
       s = std::max(0.0, std::min(1.0, ml+penalty));
       photon = (s>fPhotonThreshold);
       return true;
