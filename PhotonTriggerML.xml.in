@@ -2,9 +2,7 @@
 
 <!-- Configuration of PhotonTriggerML Module (Balanced Version) -->
 
-<PhotonTriggerML
-  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xsi:noNamespaceSchemaLocation='@SCHEMALOCATION@/PhotonTriggerML.xsd'>
+<PhotonTriggerML>
 
   <!-- Energy range for trigger application -->
   <EnergyMin unit="eV"> 1e18 </EnergyMin>
