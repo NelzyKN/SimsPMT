@@ -3,10 +3,10 @@
 
 /**
  * \file PhotonTriggerML.h
- * \brief Enhanced ML-based photon trigger module with balanced training (FIXED VERSION)
+ * \brief Balanced ML-based photon trigger module with improved training
  * 
- * This version includes Adam optimizer, dropout regularization,
- * validation set, early stopping, and improved training strategy.
+ * This version includes better class balancing, improved features,
+ * and more sophisticated training strategies.
  * 
  * Author: Khoa Nguyen
  * Institution: Michigan Technological University
@@ -21,6 +21,7 @@
 #include <memory>
 #include <array>
 #include <cmath>
+#include <deque>
 
 // Forward declarations
 class TFile;
@@ -38,7 +39,7 @@ namespace sevt {
 
 /**
  * \class PhotonTriggerML
- * \brief Enhanced machine learning photon trigger with balanced training
+ * \brief Machine learning photon trigger with improved balance
  */
 class PhotonTriggerML : public fwk::VModule {
 public:
@@ -59,7 +60,7 @@ public:
     
     /**
      * \struct EnhancedFeatures
-     * \brief Improved feature set based on photon shower characteristics
+     * \brief Comprehensive feature set for photon discrimination
      */
     struct EnhancedFeatures {
         // Temporal features
@@ -84,12 +85,17 @@ public:
         double late_fraction;      ///< Fraction of charge in last 25%
         double time_spread;        ///< RMS time spread [ns]
         
-        // Frequency domain (simple)
+        // Frequency domain
         double high_freq_content;  ///< High frequency power ratio
         
         // Multi-peak structure
         int num_peaks;            ///< Number of significant peaks
         double secondary_peak_ratio; ///< Ratio of 2nd largest to largest peak
+        
+        // Additional discriminative features
+        double rise_fall_ratio;   ///< Risetime/falltime ratio
+        double peak_time;         ///< Time of peak relative to start [ns]
+        double charge_asymmetry;  ///< Early-late charge asymmetry
         
         EnhancedFeatures() : 
             risetime_10_50(0), risetime_10_90(0), falltime_90_10(0),
@@ -97,12 +103,13 @@ public:
             total_charge(0), peak_charge_ratio(0), smoothness(0),
             kurtosis(0), skewness(0), early_fraction(0),
             late_fraction(0), time_spread(0), high_freq_content(0),
-            num_peaks(0), secondary_peak_ratio(0) {}
+            num_peaks(0), secondary_peak_ratio(0), rise_fall_ratio(0),
+            peak_time(0), charge_asymmetry(0) {}
     };
     
     /**
      * \class NeuralNetwork
-     * \brief Enhanced neural network with Adam optimizer and dropout
+     * \brief Improved neural network with better architecture
      */
     class NeuralNetwork {
     public:
@@ -110,99 +117,99 @@ public:
         ~NeuralNetwork() = default;
         
         /**
-         * \brief Initialize network with random weights
-         * \param input_size Number of input features (17 for EnhancedFeatures)
-         * \param hidden1_size First hidden layer size
-         * \param hidden2_size Second hidden layer size
+         * \brief Initialize network with improved architecture
+         * \param input_size Number of input features
+         * \param hidden_sizes Vector of hidden layer sizes
          */
-        void Initialize(int input_size = 17, int hidden1_size = 24, int hidden2_size = 12);
+        void Initialize(int input_size, const std::vector<int>& hidden_sizes);
         
         /**
          * \brief Forward pass through the network
          * \param features Input feature vector
-         * \param training Whether to apply dropout (true during training)
+         * \param training Whether to apply dropout
          * \return Photon probability (0-1)
          */
         double Predict(const std::vector<double>& features, bool training = false);
         
         /**
-         * \brief Train the network on a batch of examples with Adam optimizer
+         * \brief Train with balanced batch and proper loss
          * \param features Batch of feature vectors
          * \param labels Batch of labels (1 for photon, 0 for hadron)
+         * \param weights Sample weights for balancing
          * \param learning_rate Learning rate
          * \return Average loss for the batch
          */
         double Train(const std::vector<std::vector<double>>& features,
                     const std::vector<int>& labels,
+                    const std::vector<double>& weights,
                     double learning_rate = 0.001);
         
         /**
          * \brief Save network weights to file
-         * \param filename Output file name
          */
         void SaveWeights(const std::string& filename);
         
         /**
          * \brief Load network weights from file
-         * \param filename Input file name
-         * \return true if successful
          */
         bool LoadWeights(const std::string& filename);
         
         /**
-         * \brief Quantize weights to 8-bit for FPGA deployment
+         * \brief Calculate optimal threshold using validation set
          */
-        void QuantizeWeights();
+        double CalculateOptimalThreshold(
+            const std::vector<std::vector<double>>& val_features,
+            const std::vector<int>& val_labels);
         
     private:
         // Network architecture
         int fInputSize;
-        int fHidden1Size;
-        int fHidden2Size;
+        std::vector<int> fHiddenSizes;
+        int fNumLayers;
         
-        // Weight matrices (row-major storage)
-        std::vector<std::vector<double>> fWeights1;  ///< Input to hidden1
-        std::vector<std::vector<double>> fWeights2;  ///< Hidden1 to hidden2
-        std::vector<std::vector<double>> fWeights3;  ///< Hidden2 to output
+        // Weight matrices and biases for each layer
+        std::vector<std::vector<std::vector<double>>> fWeights;
+        std::vector<std::vector<double>> fBiases;
         
-        // Bias vectors
-        std::vector<double> fBias1;
-        std::vector<double> fBias2;
-        double fBias3;
+        // Adam optimizer state
+        std::vector<std::vector<std::vector<double>>> fMomentum1_w;
+        std::vector<std::vector<std::vector<double>>> fMomentum2_w;
+        std::vector<std::vector<double>> fMomentum1_b;
+        std::vector<std::vector<double>> fMomentum2_b;
+        int fTimeStep;
         
-        // Adam optimizer momentum terms
-        std::vector<std::vector<double>> fMomentum1_w1;
-        std::vector<std::vector<double>> fMomentum2_w1;
-        std::vector<std::vector<double>> fMomentum1_w2;
-        std::vector<std::vector<double>> fMomentum2_w2;
-        std::vector<std::vector<double>> fMomentum1_w3;
-        std::vector<std::vector<double>> fMomentum2_w3;
-        
-        std::vector<double> fMomentum1_b1;
-        std::vector<double> fMomentum2_b1;
-        std::vector<double> fMomentum1_b2;
-        std::vector<double> fMomentum2_b2;
-        double fMomentum1_b3;
-        double fMomentum2_b3;
-        
-        int fTimeStep;  ///< Adam optimizer time step
-        
-        // Dropout parameters
+        // Regularization
         double fDropoutRate;
+        double fL2Lambda;
         
         // Activation functions
-        double ReLU(double x) { return x > 0 ? x : 0; }
-        double ReLUDerivative(double x) { return x > 0 ? 1 : 0; }
-        double Sigmoid(double x) { return 1.0 / (1.0 + exp(-x)); }
+        double LeakyReLU(double x, double alpha = 0.01) { 
+            return x > 0 ? x : alpha * x; 
+        }
+        double LeakyReLUDerivative(double x, double alpha = 0.01) { 
+            return x > 0 ? 1 : alpha; 
+        }
+        double Sigmoid(double x) { 
+            // Numerically stable sigmoid
+            if (x >= 0) {
+                double exp_neg_x = exp(-x);
+                return 1.0 / (1.0 + exp_neg_x);
+            } else {
+                double exp_x = exp(x);
+                return exp_x / (1.0 + exp_x);
+            }
+        }
         
-        // Quantization parameters
-        bool fIsQuantized;
-        double fQuantizationScale;
+        // Batch normalization parameters (simplified)
+        std::vector<std::vector<double>> fBatchNormMean;
+        std::vector<std::vector<double>> fBatchNormVar;
+        std::vector<std::vector<double>> fBatchNormGamma;
+        std::vector<std::vector<double>> fBatchNormBeta;
     };
     
     /**
      * \struct MLResult
-     * \brief Enhanced ML analysis results
+     * \brief ML analysis results
      */
     struct MLResult {
         double photonScore;
@@ -211,7 +218,7 @@ public:
         double vemCharge;
         EnhancedFeatures features;
         std::string primaryType;
-        double confidence;  ///< Confidence level (distance from 0.5)
+        double confidence;
         
         MLResult() : photonScore(0), identifiedAsPhoton(false), 
                     isActualPhoton(false), vemCharge(0), 
@@ -225,45 +232,37 @@ public:
 private:
     /**
      * \brief Extract enhanced features from FADC trace
-     * \param trace FADC trace data (2048 bins)
-     * \param baseline Baseline ADC value
-     * \return Enhanced feature set
      */
     EnhancedFeatures ExtractEnhancedFeatures(const std::vector<double>& trace, 
                                              double baseline = 50.0);
     
     /**
-     * \brief Normalize features for neural network input
-     * \param features Raw features
-     * \return Normalized feature vector
+     * \brief Normalize features with robust scaling
      */
     std::vector<double> NormalizeFeatures(const EnhancedFeatures& features);
     
     /**
-     * \brief Update running statistics for adaptive normalization
-     * \param features Current feature set
+     * \brief Update feature statistics for normalization
      */
     void UpdateFeatureStatistics(const EnhancedFeatures& features);
     
     /**
      * \brief Process a single station
-     * \param station Station to process
      */
     void ProcessStation(const sevt::Station& station);
     
     /**
-     * \brief Train the neural network on accumulated data
-     * \return Validation loss for early stopping
+     * \brief Balanced training with proper sampling
      */
     double TrainNetwork();
     
     /**
-     * \brief Calculate performance metrics
+     * \brief Generate synthetic photon samples (SMOTE-like)
      */
-    void CalculatePerformanceMetrics();
+    void GenerateSyntheticPhotons();
     
     /**
-     * \brief Calculate and display metrics in table format
+     * \brief Calculate and display metrics
      */
     void CalculateAndDisplayMetrics();
     
@@ -273,28 +272,32 @@ private:
     bool ExtractTraceData(const sevt::PMT& pmt, std::vector<double>& trace_data);
     
     /**
-     * \brief Write analysis to log file
+     * \brief Dynamic threshold adjustment based on performance
      */
-    void WriteMLAnalysisToLog();
+    void UpdateThreshold();
     
     // Neural network
     std::unique_ptr<NeuralNetwork> fNeuralNetwork;
     
-    // Training data accumulation
-    std::vector<std::vector<double>> fTrainingFeatures;
-    std::vector<int> fTrainingLabels;
+    // Training data with balanced sampling
+    std::deque<std::vector<double>> fPhotonFeatures;
+    std::deque<std::vector<double>> fHadronFeatures;
     
-    // Validation data for early stopping
+    // Validation data
     std::vector<std::vector<double>> fValidationFeatures;
     std::vector<int> fValidationLabels;
     
+    // Training parameters
     bool fIsTraining;
     int fTrainingEpochs;
-    int fTrainingStep;  // Training step counter for learning rate scheduling
+    int fBatchSize;
+    double fLearningRate;
+    double fLearningRateDecay;
     
-    // Early stopping parameters
+    // Early stopping
     double fBestValidationLoss;
     int fEpochsSinceImprovement;
+    int fPatienceEpochs;
     
     // Event and station counters
     int fEventCount;
@@ -334,8 +337,6 @@ private:
     TH2D* hScoreVsEnergy;
     TH2D* hScoreVsDistance;
     TGraph* gROCCurve;
-    
-    // Additional debugging histograms
     TH2D* hConfusionMatrix;
     TH1D* hTrainingLoss;
     TH1D* hValidationLoss;
@@ -349,20 +350,27 @@ private:
     
     // Configuration
     double fPhotonThreshold;
+    double fAdaptiveThreshold;  // Dynamically adjusted
     double fEnergyMin;
     double fEnergyMax;
     std::string fOutputFileName;
     std::string fWeightsFileName;
     bool fLoadPretrainedWeights;
+    bool fSaveFeatures;
+    bool fApplyTrigger;
     
-    // Feature normalization parameters (computed from training data)
-    std::vector<double> fFeatureMeans;
-    std::vector<double> fFeatureStdDevs;
+    // Feature normalization (robust scaling)
+    std::vector<double> fFeatureMedians;
+    std::vector<double> fFeatureIQRs;
+    bool fNormalizationInitialized;
     
-    // Trigger type analysis
-    std::map<std::string, int> fTriggerCounts;
-    std::map<std::string, int> fParticleTypeCounts;
-    std::map<std::string, int> fParticleTypePhotonLike;
+    // Class weight balancing
+    double fPhotonWeight;
+    double fHadronWeight;
+    
+    // Maximum buffer sizes
+    static const int kMaxPhotonBuffer = 5000;
+    static const int kMaxHadronBuffer = 5000;
     
     // Static ML results storage
     static std::map<int, MLResult> fMLResultsMap;

@@ -1,5 +1,5 @@
-// PhotonTriggerML.cc - RADICALLY FIXED VERSION FOR EXTREME CLASS IMBALANCE
-// This version uses extreme measures to force photon detection
+// PhotonTriggerML.cc - BALANCED VERSION WITH IMPROVED TRAINING
+// This version properly handles class imbalance and improves photon detection
 
 #include "PhotonTriggerML.h"
 
@@ -54,6 +54,10 @@ PhotonTriggerML* PhotonTriggerML::fInstance = 0;
 // Static ML results map
 std::map<int, PhotonTriggerML::MLResult> PhotonTriggerML::fMLResultsMap;
 
+// Buffer size constants
+const int PhotonTriggerML::kMaxPhotonBuffer;
+const int PhotonTriggerML::kMaxHadronBuffer;
+
 // Signal handler function
 void PhotonTriggerMLSignalHandler(int signal)
 {
@@ -69,89 +73,101 @@ void PhotonTriggerMLSignalHandler(int signal)
 }
 
 // ============================================================================
-// RADICALLY IMPROVED Neural Network Implementation
+// Improved Neural Network Implementation
 // ============================================================================
 
 PhotonTriggerML::NeuralNetwork::NeuralNetwork() :
-    fInputSize(0), fHidden1Size(0), fHidden2Size(0),
-    fTimeStep(0), fDropoutRate(0.1),  // Very low dropout
-    fIsQuantized(false), fQuantizationScale(127.0)
+    fInputSize(0), fNumLayers(0), fTimeStep(0),
+    fDropoutRate(0.3), fL2Lambda(0.0001)
 {
 }
 
-void PhotonTriggerML::NeuralNetwork::Initialize(int input_size, int hidden1_size, int hidden2_size)
+void PhotonTriggerML::NeuralNetwork::Initialize(int input_size, const std::vector<int>& hidden_sizes)
 {
     fInputSize = input_size;
-    fHidden1Size = hidden1_size;
-    fHidden2Size = hidden2_size;
+    fHiddenSizes = hidden_sizes;
+    fNumLayers = hidden_sizes.size() + 1; // Hidden layers + output layer
     
-    cout << "Initializing RADICAL Neural Network: " << input_size << " -> " 
-         << hidden1_size << " -> " << hidden2_size << " -> 1" << endl;
+    cout << "Initializing Improved Neural Network: " << input_size;
+    for (int size : hidden_sizes) {
+        cout << " -> " << size;
+    }
+    cout << " -> 1" << endl;
     
-    // Use fixed seed initially for reproducibility
+    // Random initialization
     std::mt19937 gen(42);
-    
-    // Xavier initialization for better gradient flow
     std::normal_distribution<> dist(0.0, 1.0);
     
-    // Initialize weights with Xavier/He initialization
-    fWeights1.resize(hidden1_size, std::vector<double>(input_size));
-    double scale1 = sqrt(2.0 / input_size);
-    for (int i = 0; i < hidden1_size; ++i) {
-        for (int j = 0; j < input_size; ++j) {
-            fWeights1[i][j] = dist(gen) * scale1;
+    // Initialize weights and biases for each layer
+    fWeights.clear();
+    fBiases.clear();
+    fMomentum1_w.clear();
+    fMomentum2_w.clear();
+    fMomentum1_b.clear();
+    fMomentum2_b.clear();
+    
+    // Batch norm parameters
+    fBatchNormMean.clear();
+    fBatchNormVar.clear();
+    fBatchNormGamma.clear();
+    fBatchNormBeta.clear();
+    
+    int prev_size = input_size;
+    for (size_t i = 0; i < hidden_sizes.size(); ++i) {
+        int curr_size = hidden_sizes[i];
+        
+        // He initialization for ReLU variants
+        double scale = sqrt(2.0 / prev_size);
+        
+        // Weight matrix for this layer
+        std::vector<std::vector<double>> layer_weights(curr_size, std::vector<double>(prev_size));
+        for (int j = 0; j < curr_size; ++j) {
+            for (int k = 0; k < prev_size; ++k) {
+                layer_weights[j][k] = dist(gen) * scale;
+            }
         }
+        fWeights.push_back(layer_weights);
+        
+        // Bias vector for this layer
+        std::vector<double> layer_bias(curr_size, 0.01);
+        fBiases.push_back(layer_bias);
+        
+        // Adam optimizer state
+        fMomentum1_w.push_back(std::vector<std::vector<double>>(curr_size, std::vector<double>(prev_size, 0)));
+        fMomentum2_w.push_back(std::vector<std::vector<double>>(curr_size, std::vector<double>(prev_size, 0)));
+        fMomentum1_b.push_back(std::vector<double>(curr_size, 0));
+        fMomentum2_b.push_back(std::vector<double>(curr_size, 0));
+        
+        // Batch norm parameters
+        fBatchNormMean.push_back(std::vector<double>(curr_size, 0));
+        fBatchNormVar.push_back(std::vector<double>(curr_size, 1));
+        fBatchNormGamma.push_back(std::vector<double>(curr_size, 1));
+        fBatchNormBeta.push_back(std::vector<double>(curr_size, 0));
+        
+        prev_size = curr_size;
     }
     
-    fWeights2.resize(hidden2_size, std::vector<double>(hidden1_size));
-    double scale2 = sqrt(2.0 / hidden1_size);
-    for (int i = 0; i < hidden2_size; ++i) {
-        for (int j = 0; j < hidden1_size; ++j) {
-            fWeights2[i][j] = dist(gen) * scale2;
-        }
+    // Output layer (single neuron for binary classification)
+    double scale = sqrt(2.0 / prev_size);
+    std::vector<std::vector<double>> output_weights(1, std::vector<double>(prev_size));
+    for (int k = 0; k < prev_size; ++k) {
+        output_weights[0][k] = dist(gen) * scale * 0.1; // Smaller initial weights for output
     }
+    fWeights.push_back(output_weights);
     
-    fWeights3.resize(1, std::vector<double>(hidden2_size));
-    double scale3 = sqrt(2.0 / hidden2_size);
-    for (int j = 0; j < hidden2_size; ++j) {
-        fWeights3[0][j] = dist(gen) * scale3;
-    }
+    std::vector<double> output_bias(1, 0.0); // No initial bias for output
+    fBiases.push_back(output_bias);
     
-    // Initialize biases
-    std::uniform_real_distribution<> bias_dist(-0.01, 0.01);
-    fBias1.resize(hidden1_size);
-    for (int i = 0; i < hidden1_size; ++i) {
-        fBias1[i] = bias_dist(gen);
-    }
-    
-    fBias2.resize(hidden2_size);
-    for (int i = 0; i < hidden2_size; ++i) {
-        fBias2[i] = bias_dist(gen);
-    }
-    
-    // CRITICAL: Strong positive bias to encourage photon predictions
-    fBias3 = 0.5;  // Much stronger positive bias
-    
-    // Initialize Adam optimizer momentum terms
-    fMomentum1_w1.resize(hidden1_size, std::vector<double>(input_size, 0));
-    fMomentum2_w1.resize(hidden1_size, std::vector<double>(input_size, 0));
-    fMomentum1_w2.resize(hidden2_size, std::vector<double>(hidden1_size, 0));
-    fMomentum2_w2.resize(hidden2_size, std::vector<double>(hidden1_size, 0));
-    fMomentum1_w3.resize(1, std::vector<double>(hidden2_size, 0));
-    fMomentum2_w3.resize(1, std::vector<double>(hidden2_size, 0));
-    
-    fMomentum1_b1.resize(hidden1_size, 0);
-    fMomentum2_b1.resize(hidden1_size, 0);
-    fMomentum1_b2.resize(hidden2_size, 0);
-    fMomentum2_b2.resize(hidden2_size, 0);
-    fMomentum1_b3 = 0;
-    fMomentum2_b3 = 0;
+    fMomentum1_w.push_back(std::vector<std::vector<double>>(1, std::vector<double>(prev_size, 0)));
+    fMomentum2_w.push_back(std::vector<std::vector<double>>(1, std::vector<double>(prev_size, 0)));
+    fMomentum1_b.push_back(std::vector<double>(1, 0));
+    fMomentum2_b.push_back(std::vector<double>(1, 0));
     
     fTimeStep = 0;
     
-    cout << "Neural Network initialized with RADICAL improvements!" << endl;
-    cout << "  - Output bias: " << fBias3 << " (strong positive)" << endl;
-    cout << "  - Dropout: " << fDropoutRate << " (minimal)" << endl;
+    cout << "Neural Network initialized with improved architecture" << endl;
+    cout << "  - Dropout rate: " << fDropoutRate << endl;
+    cout << "  - L2 regularization: " << fL2Lambda << endl;
 }
 
 double PhotonTriggerML::NeuralNetwork::Predict(const std::vector<double>& features, bool training)
@@ -160,42 +176,46 @@ double PhotonTriggerML::NeuralNetwork::Predict(const std::vector<double>& featur
         return 0.5;
     }
     
-    // Forward pass with ReLU activation for hidden layers
-    std::vector<double> hidden1(fHidden1Size);
-    for (int i = 0; i < fHidden1Size; ++i) {
-        double sum = fBias1[i];
-        for (int j = 0; j < fInputSize; ++j) {
-            sum += fWeights1[i][j] * features[j];
-        }
-        hidden1[i] = ReLU(sum);
+    // Forward pass through the network
+    std::vector<double> activations = features;
+    
+    for (size_t layer = 0; layer < fWeights.size() - 1; ++layer) {
+        std::vector<double> next_activations(fWeights[layer].size());
         
-        // Apply minimal dropout during training
-        if (training && (rand() / double(RAND_MAX)) < fDropoutRate) {
-            hidden1[i] = 0;
-        } else if (training) {
-            hidden1[i] /= (1.0 - fDropoutRate);
+        // Linear transformation
+        for (size_t i = 0; i < fWeights[layer].size(); ++i) {
+            double sum = fBiases[layer][i];
+            for (size_t j = 0; j < activations.size(); ++j) {
+                sum += fWeights[layer][i][j] * activations[j];
+            }
+            
+            // Simplified batch norm (using running statistics)
+            if (!training && layer < fBatchNormMean.size()) {
+                double mean = fBatchNormMean[layer][i];
+                double var = fBatchNormVar[layer][i];
+                double gamma = fBatchNormGamma[layer][i];
+                double beta = fBatchNormBeta[layer][i];
+                sum = gamma * (sum - mean) / sqrt(var + 1e-8) + beta;
+            }
+            
+            // Leaky ReLU activation
+            next_activations[i] = LeakyReLU(sum);
+            
+            // Dropout during training
+            if (training && (rand() / double(RAND_MAX)) < fDropoutRate) {
+                next_activations[i] = 0;
+            } else if (training) {
+                next_activations[i] /= (1.0 - fDropoutRate);
+            }
         }
+        
+        activations = next_activations;
     }
     
-    std::vector<double> hidden2(fHidden2Size);
-    for (int i = 0; i < fHidden2Size; ++i) {
-        double sum = fBias2[i];
-        for (int j = 0; j < fHidden1Size; ++j) {
-            sum += fWeights2[i][j] * hidden1[j];
-        }
-        hidden2[i] = ReLU(sum);
-        
-        if (training && (rand() / double(RAND_MAX)) < fDropoutRate) {
-            hidden2[i] = 0;
-        } else if (training) {
-            hidden2[i] /= (1.0 - fDropoutRate);
-        }
-    }
-    
-    // Output layer with sigmoid
-    double output = fBias3;
-    for (int j = 0; j < fHidden2Size; ++j) {
-        output += fWeights3[0][j] * hidden2[j];
+    // Output layer (sigmoid activation)
+    double output = fBiases.back()[0];
+    for (size_t j = 0; j < activations.size(); ++j) {
+        output += fWeights.back()[0][j] * activations[j];
     }
     
     return Sigmoid(output);
@@ -203,6 +223,7 @@ double PhotonTriggerML::NeuralNetwork::Predict(const std::vector<double>& featur
 
 double PhotonTriggerML::NeuralNetwork::Train(const std::vector<std::vector<double>>& features,
                                              const std::vector<int>& labels,
+                                             const std::vector<double>& weights,
                                              double learning_rate)
 {
     if (features.empty() || features.size() != labels.size()) {
@@ -212,224 +233,199 @@ double PhotonTriggerML::NeuralNetwork::Train(const std::vector<std::vector<doubl
     double total_loss = 0.0;
     int batch_size = static_cast<int>(features.size());
     
-    // Count classes for EXTREME weighting
-    //int num_photons = std::count(labels.begin(), labels.end(), 1);
-    //int num_hadrons = batch_size - num_photons;
+    // Initialize gradient accumulators
+    std::vector<std::vector<std::vector<double>>> grad_w(fWeights.size());
+    std::vector<std::vector<double>> grad_b(fBiases.size());
     
-    // EXTREME class weights - photons are worth 100x more
-    double photon_weight = 100.0;  // Extreme weight for photons
-    double hadron_weight = 1.0;
-    
-    // EXTREME focal loss parameters
-    double gamma = 4.0;   // Very high focusing parameter
-    double alpha = 0.95;  // Almost all weight on positive class
-    
-    // Minimal regularization
-    double lambda_l1 = 0.00001;
-    double lambda_l2 = 0.0001;
-    
-    // Initialize gradients
-    std::vector<std::vector<double>> grad_w1(fHidden1Size, std::vector<double>(fInputSize, 0));
-    std::vector<std::vector<double>> grad_w2(fHidden2Size, std::vector<double>(fHidden1Size, 0));
-    std::vector<std::vector<double>> grad_w3(1, std::vector<double>(fHidden2Size, 0));
-    std::vector<double> grad_b1(fHidden1Size, 0);
-    std::vector<double> grad_b2(fHidden2Size, 0);
-    double grad_b3 = 0;
+    for (size_t layer = 0; layer < fWeights.size(); ++layer) {
+        grad_w[layer].resize(fWeights[layer].size(), 
+                            std::vector<double>(fWeights[layer][0].size(), 0));
+        grad_b[layer].resize(fBiases[layer].size(), 0);
+    }
     
     // Process each sample
     for (int sample = 0; sample < batch_size; ++sample) {
         const auto& input = features[sample];
         int label = labels[sample];
+        double sample_weight = weights[sample];
         
-        // Forward pass
-        std::vector<double> hidden1(fHidden1Size);
-        std::vector<double> hidden1_raw(fHidden1Size);
-        std::vector<bool> dropout1(fHidden1Size);
+        // Forward pass with intermediate storage
+        std::vector<std::vector<double>> layer_inputs;
+        std::vector<std::vector<double>> layer_outputs;
+        std::vector<std::vector<bool>> dropout_masks;
         
-        for (int i = 0; i < fHidden1Size; ++i) {
-            double sum = fBias1[i];
-            for (int j = 0; j < fInputSize; ++j) {
-                sum += fWeights1[i][j] * input[j];
+        layer_inputs.push_back(input);
+        std::vector<double> activations = input;
+        
+        // Forward through hidden layers
+        for (size_t layer = 0; layer < fWeights.size() - 1; ++layer) {
+            std::vector<double> pre_activation(fWeights[layer].size());
+            std::vector<double> post_activation(fWeights[layer].size());
+            std::vector<bool> dropout_mask(fWeights[layer].size());
+            
+            for (size_t i = 0; i < fWeights[layer].size(); ++i) {
+                double sum = fBiases[layer][i];
+                for (size_t j = 0; j < activations.size(); ++j) {
+                    sum += fWeights[layer][i][j] * activations[j];
+                }
+                pre_activation[i] = sum;
+                
+                // Leaky ReLU
+                post_activation[i] = LeakyReLU(sum);
+                
+                // Dropout
+                dropout_mask[i] = (rand() / double(RAND_MAX)) >= fDropoutRate;
+                if (!dropout_mask[i]) {
+                    post_activation[i] = 0;
+                } else {
+                    post_activation[i] /= (1.0 - fDropoutRate);
+                }
             }
-            hidden1_raw[i] = sum;
-            hidden1[i] = ReLU(sum);
-            dropout1[i] = (rand() / double(RAND_MAX)) >= fDropoutRate;
-            if (!dropout1[i]) hidden1[i] = 0;
-            else hidden1[i] /= (1.0 - fDropoutRate);
+            
+            layer_outputs.push_back(pre_activation);
+            dropout_masks.push_back(dropout_mask);
+            activations = post_activation;
+            layer_inputs.push_back(activations);
         }
         
-        std::vector<double> hidden2(fHidden2Size);
-        std::vector<double> hidden2_raw(fHidden2Size);
-        std::vector<bool> dropout2(fHidden2Size);
-        
-        for (int i = 0; i < fHidden2Size; ++i) {
-            double sum = fBias2[i];
-            for (int j = 0; j < fHidden1Size; ++j) {
-                sum += fWeights2[i][j] * hidden1[j];
-            }
-            hidden2_raw[i] = sum;
-            hidden2[i] = ReLU(sum);
-            dropout2[i] = (rand() / double(RAND_MAX)) >= fDropoutRate;
-            if (!dropout2[i]) hidden2[i] = 0;
-            else hidden2[i] /= (1.0 - fDropoutRate);
+        // Output layer
+        double output_raw = fBiases.back()[0];
+        for (size_t j = 0; j < activations.size(); ++j) {
+            output_raw += fWeights.back()[0][j] * activations[j];
         }
-        
-        double output_raw = fBias3;
-        for (int j = 0; j < fHidden2Size; ++j) {
-            output_raw += fWeights3[0][j] * hidden2[j];
-        }
-        
         double output = Sigmoid(output_raw);
         
-        // EXTREME focal loss with class weighting
-        double p = output;
-        double pt = label ? p : (1 - p);
-        double class_weight = label ? photon_weight : hadron_weight;
-        double alpha_t = label ? alpha : (1 - alpha);
-        double focal_weight = alpha_t * class_weight * pow(1 - pt, gamma);
-        
-        double loss = -focal_weight * (label * log(p + 1e-7) + 
-                                       (1 - label) * log(1 - p + 1e-7));
+        // Weighted binary cross-entropy loss
+        double loss = -sample_weight * (label * log(output + 1e-7) + 
+                                        (1 - label) * log(1 - output + 1e-7));
         total_loss += loss;
         
-        // Backpropagation with modified gradient
-        double focal_grad_factor = alpha_t * class_weight * (
-            -gamma * pow(1 - pt, gamma - 1) * log(pt + 1e-7) +
-            pow(1 - pt, gamma) / (pt + 1e-7)
-        );
-        double output_grad = focal_grad_factor * (output - label);
-        
-        // Gradient clipping
-        output_grad = max(-10.0, min(10.0, output_grad));
+        // Backward pass
+        double output_grad = sample_weight * (output - label);
         
         // Output layer gradients
-        for (int j = 0; j < fHidden2Size; ++j) {
-            grad_w3[0][j] += output_grad * hidden2[j];
+        for (size_t j = 0; j < activations.size(); ++j) {
+            grad_w.back()[0][j] += output_grad * activations[j];
         }
-        grad_b3 += output_grad;
+        grad_b.back()[0] += output_grad;
         
-        // Hidden layer 2 gradients
-        std::vector<double> hidden2_grad(fHidden2Size);
-        for (int j = 0; j < fHidden2Size; ++j) {
-            if (dropout2[j]) {
-                hidden2_grad[j] = fWeights3[0][j] * output_grad;
-                hidden2_grad[j] *= ReLUDerivative(hidden2_raw[j]);
-                hidden2_grad[j] /= (1.0 - fDropoutRate);
-            }
+        // Backpropagate through hidden layers
+        std::vector<double> prev_grad(activations.size());
+        for (size_t j = 0; j < activations.size(); ++j) {
+            prev_grad[j] = fWeights.back()[0][j] * output_grad;
         }
         
-        for (int i = 0; i < fHidden2Size; ++i) {
-            for (int j = 0; j < fHidden1Size; ++j) {
-                grad_w2[i][j] += hidden2_grad[i] * hidden1[j];
-            }
-            grad_b2[i] += hidden2_grad[i];
-        }
-        
-        // Hidden layer 1 gradients
-        std::vector<double> hidden1_grad(fHidden1Size);
-        for (int j = 0; j < fHidden1Size; ++j) {
-            if (dropout1[j]) {
-                hidden1_grad[j] = 0;
-                for (int i = 0; i < fHidden2Size; ++i) {
-                    hidden1_grad[j] += fWeights2[i][j] * hidden2_grad[i];
+        for (int layer = fWeights.size() - 2; layer >= 0; --layer) {
+            std::vector<double> layer_grad(fWeights[layer].size());
+            
+            for (size_t i = 0; i < fWeights[layer].size(); ++i) {
+                if (dropout_masks[layer][i]) {
+                    double grad = prev_grad[i];
+                    grad *= LeakyReLUDerivative(layer_outputs[layer][i]);
+                    grad /= (1.0 - fDropoutRate);
+                    layer_grad[i] = grad;
+                    
+                    for (size_t j = 0; j < layer_inputs[layer].size(); ++j) {
+                        grad_w[layer][i][j] += grad * layer_inputs[layer][j];
+                    }
+                    grad_b[layer][i] += grad;
                 }
-                hidden1_grad[j] *= ReLUDerivative(hidden1_raw[j]);
-                hidden1_grad[j] /= (1.0 - fDropoutRate);
             }
-        }
-        
-        for (int i = 0; i < fHidden1Size; ++i) {
-            for (int j = 0; j < fInputSize; ++j) {
-                grad_w1[i][j] += hidden1_grad[i] * input[j];
+            
+            if (layer > 0) {
+                prev_grad.resize(layer_inputs[layer].size());
+                for (size_t j = 0; j < layer_inputs[layer].size(); ++j) {
+                    prev_grad[j] = 0;
+                    for (size_t i = 0; i < fWeights[layer].size(); ++i) {
+                        if (dropout_masks[layer][i]) {
+                            prev_grad[j] += fWeights[layer][i][j] * layer_grad[i];
+                        }
+                    }
+                }
             }
-            grad_b1[i] += hidden1_grad[i];
         }
     }
     
-    // Adam optimizer with minimal regularization
+    // Update weights with Adam optimizer
     fTimeStep++;
     double beta1 = 0.9;
     double beta2 = 0.999;
     double epsilon = 1e-8;
     
-    // Update weights with Adam
-    for (int i = 0; i < fHidden1Size; ++i) {
-        for (int j = 0; j < fInputSize; ++j) {
-            double l1_grad = lambda_l1 * (fWeights1[i][j] > 0 ? 1 : -1);
-            double l2_grad = lambda_l2 * fWeights1[i][j];
-            double grad = grad_w1[i][j] / batch_size + l1_grad + l2_grad;
+    for (size_t layer = 0; layer < fWeights.size(); ++layer) {
+        for (size_t i = 0; i < fWeights[layer].size(); ++i) {
+            for (size_t j = 0; j < fWeights[layer][i].size(); ++j) {
+                double grad = grad_w[layer][i][j] / batch_size;
+                
+                // L2 regularization
+                grad += fL2Lambda * fWeights[layer][i][j];
+                
+                // Adam update
+                fMomentum1_w[layer][i][j] = beta1 * fMomentum1_w[layer][i][j] + (1 - beta1) * grad;
+                fMomentum2_w[layer][i][j] = beta2 * fMomentum2_w[layer][i][j] + (1 - beta2) * grad * grad;
+                
+                double m_hat = fMomentum1_w[layer][i][j] / (1 - pow(beta1, fTimeStep));
+                double v_hat = fMomentum2_w[layer][i][j] / (1 - pow(beta2, fTimeStep));
+                
+                fWeights[layer][i][j] -= learning_rate * m_hat / (sqrt(v_hat) + epsilon);
+            }
             
-            fMomentum1_w1[i][j] = beta1 * fMomentum1_w1[i][j] + (1 - beta1) * grad;
-            fMomentum2_w1[i][j] = beta2 * fMomentum2_w1[i][j] + (1 - beta2) * grad * grad;
+            // Update bias
+            double grad = grad_b[layer][i] / batch_size;
+            fMomentum1_b[layer][i] = beta1 * fMomentum1_b[layer][i] + (1 - beta1) * grad;
+            fMomentum2_b[layer][i] = beta2 * fMomentum2_b[layer][i] + (1 - beta2) * grad * grad;
             
-            double m_hat = fMomentum1_w1[i][j] / (1 - pow(beta1, fTimeStep));
-            double v_hat = fMomentum2_w1[i][j] / (1 - pow(beta2, fTimeStep));
+            double m_hat = fMomentum1_b[layer][i] / (1 - pow(beta1, fTimeStep));
+            double v_hat = fMomentum2_b[layer][i] / (1 - pow(beta2, fTimeStep));
             
-            fWeights1[i][j] -= learning_rate * m_hat / (sqrt(v_hat) + epsilon);
+            fBiases[layer][i] -= learning_rate * m_hat / (sqrt(v_hat) + epsilon);
         }
-        
-        double grad = grad_b1[i] / batch_size;
-        fMomentum1_b1[i] = beta1 * fMomentum1_b1[i] + (1 - beta1) * grad;
-        fMomentum2_b1[i] = beta2 * fMomentum2_b1[i] + (1 - beta2) * grad * grad;
-        
-        double m_hat = fMomentum1_b1[i] / (1 - pow(beta1, fTimeStep));
-        double v_hat = fMomentum2_b1[i] / (1 - pow(beta2, fTimeStep));
-        
-        fBias1[i] -= learning_rate * m_hat / (sqrt(v_hat) + epsilon);
     }
-    
-    for (int i = 0; i < fHidden2Size; ++i) {
-        for (int j = 0; j < fHidden1Size; ++j) {
-            double l1_grad = lambda_l1 * (fWeights2[i][j] > 0 ? 1 : -1);
-            double l2_grad = lambda_l2 * fWeights2[i][j];
-            double grad = grad_w2[i][j] / batch_size + l1_grad + l2_grad;
-            
-            fMomentum1_w2[i][j] = beta1 * fMomentum1_w2[i][j] + (1 - beta1) * grad;
-            fMomentum2_w2[i][j] = beta2 * fMomentum2_w2[i][j] + (1 - beta2) * grad * grad;
-            
-            double m_hat = fMomentum1_w2[i][j] / (1 - pow(beta1, fTimeStep));
-            double v_hat = fMomentum2_w2[i][j] / (1 - pow(beta2, fTimeStep));
-            
-            fWeights2[i][j] -= learning_rate * m_hat / (sqrt(v_hat) + epsilon);
-        }
-        
-        double grad = grad_b2[i] / batch_size;
-        fMomentum1_b2[i] = beta1 * fMomentum1_b2[i] + (1 - beta1) * grad;
-        fMomentum2_b2[i] = beta2 * fMomentum2_b2[i] + (1 - beta2) * grad * grad;
-        
-        double m_hat = fMomentum1_b2[i] / (1 - pow(beta1, fTimeStep));
-        double v_hat = fMomentum2_b2[i] / (1 - pow(beta2, fTimeStep));
-        
-        fBias2[i] -= learning_rate * m_hat / (sqrt(v_hat) + epsilon);
-    }
-    
-    for (int j = 0; j < fHidden2Size; ++j) {
-        double l1_grad = lambda_l1 * (fWeights3[0][j] > 0 ? 1 : -1);
-        double l2_grad = lambda_l2 * fWeights3[0][j];
-        double grad = grad_w3[0][j] / batch_size + l1_grad + l2_grad;
-        
-        fMomentum1_w3[0][j] = beta1 * fMomentum1_w3[0][j] + (1 - beta1) * grad;
-        fMomentum2_w3[0][j] = beta2 * fMomentum2_w3[0][j] + (1 - beta2) * grad * grad;
-        
-        double m_hat = fMomentum1_w3[0][j] / (1 - pow(beta1, fTimeStep));
-        double v_hat = fMomentum2_w3[0][j] / (1 - pow(beta2, fTimeStep));
-        
-        fWeights3[0][j] -= learning_rate * m_hat / (sqrt(v_hat) + epsilon);
-    }
-    
-    double grad = grad_b3 / batch_size;
-    fMomentum1_b3 = beta1 * fMomentum1_b3 + (1 - beta1) * grad;
-    fMomentum2_b3 = beta2 * fMomentum2_b3 + (1 - beta2) * grad * grad;
-    
-    double m_hat = fMomentum1_b3 / (1 - pow(beta1, fTimeStep));
-    double v_hat = fMomentum2_b3 / (1 - pow(beta2, fTimeStep));
-    
-    fBias3 -= learning_rate * m_hat / (sqrt(v_hat) + epsilon);
-    
-    // Keep bias3 positive to encourage photon predictions
-    if (fBias3 < 0.1) fBias3 = 0.1;
     
     return total_loss / batch_size;
+}
+
+double PhotonTriggerML::NeuralNetwork::CalculateOptimalThreshold(
+    const std::vector<std::vector<double>>& val_features,
+    const std::vector<int>& val_labels)
+{
+    if (val_features.empty()) return 0.5;
+    
+    // Get predictions for validation set
+    std::vector<double> predictions;
+    for (const auto& features : val_features) {
+        predictions.push_back(Predict(features, false));
+    }
+    
+    // Try different thresholds and find best F1 score
+    double best_threshold = 0.5;
+    double best_f1 = 0;
+    
+    for (double threshold = 0.1; threshold <= 0.9; threshold += 0.05) {
+        int tp = 0, fp = 0, tn = 0, fn = 0;
+        
+        for (size_t i = 0; i < predictions.size(); ++i) {
+            bool predicted = (predictions[i] > threshold);
+            bool actual = (val_labels[i] == 1);
+            
+            if (predicted && actual) tp++;
+            else if (predicted && !actual) fp++;
+            else if (!predicted && actual) fn++;
+            else tn++;
+        }
+        
+        double precision = (tp + fp > 0) ? double(tp) / (tp + fp) : 0;
+        double recall = (tp + fn > 0) ? double(tp) / (tp + fn) : 0;
+        double f1 = (precision + recall > 0) ? 2 * precision * recall / (precision + recall) : 0;
+        
+        if (f1 > best_f1) {
+            best_f1 = f1;
+            best_threshold = threshold;
+        }
+    }
+    
+    cout << "Optimal threshold: " << best_threshold << " (F1: " << best_f1 << ")" << endl;
+    return best_threshold;
 }
 
 void PhotonTriggerML::NeuralNetwork::SaveWeights(const std::string& filename)
@@ -440,25 +436,22 @@ void PhotonTriggerML::NeuralNetwork::SaveWeights(const std::string& filename)
         return;
     }
     
-    file << fInputSize << " " << fHidden1Size << " " << fHidden2Size << "\n";
+    // Save architecture
+    file << fInputSize << " " << fHiddenSizes.size() << "\n";
+    for (int size : fHiddenSizes) {
+        file << size << " ";
+    }
+    file << "\n";
     
-    for (const auto& row : fWeights1) {
-        for (double w : row) file << w << " ";
+    // Save weights and biases
+    for (size_t layer = 0; layer < fWeights.size(); ++layer) {
+        for (const auto& row : fWeights[layer]) {
+            for (double w : row) file << w << " ";
+            file << "\n";
+        }
+        for (double b : fBiases[layer]) file << b << " ";
         file << "\n";
     }
-    for (double b : fBias1) file << b << " ";
-    file << "\n";
-    
-    for (const auto& row : fWeights2) {
-        for (double w : row) file << w << " ";
-        file << "\n";
-    }
-    for (double b : fBias2) file << b << " ";
-    file << "\n";
-    
-    for (double w : fWeights3[0]) file << w << " ";
-    file << "\n";
-    file << fBias3 << "\n";
     
     file.close();
     cout << "Weights saved to " << filename << endl;
@@ -472,49 +465,45 @@ bool PhotonTriggerML::NeuralNetwork::LoadWeights(const std::string& filename)
         return false;
     }
     
-    file >> fInputSize >> fHidden1Size >> fHidden2Size;
+    // Load architecture
+    int input_size, num_hidden;
+    file >> input_size >> num_hidden;
     
-    fWeights1.resize(fHidden1Size, std::vector<double>(fInputSize));
-    fWeights2.resize(fHidden2Size, std::vector<double>(fHidden1Size));
-    fWeights3.resize(1, std::vector<double>(fHidden2Size));
-    fBias1.resize(fHidden1Size);
-    fBias2.resize(fHidden2Size);
-    
-    for (auto& row : fWeights1) {
-        for (double& w : row) file >> w;
+    std::vector<int> hidden_sizes(num_hidden);
+    for (int i = 0; i < num_hidden; ++i) {
+        file >> hidden_sizes[i];
     }
-    for (double& b : fBias1) file >> b;
     
-    for (auto& row : fWeights2) {
-        for (double& w : row) file >> w;
+    // Reinitialize with loaded architecture
+    Initialize(input_size, hidden_sizes);
+    
+    // Load weights and biases
+    for (size_t layer = 0; layer < fWeights.size(); ++layer) {
+        for (auto& row : fWeights[layer]) {
+            for (double& w : row) file >> w;
+        }
+        for (double& b : fBiases[layer]) file >> b;
     }
-    for (double& b : fBias2) file >> b;
-    
-    for (double& w : fWeights3[0]) file >> w;
-    file >> fBias3;
     
     file.close();
     cout << "Weights loaded from " << filename << endl;
     return true;
 }
 
-void PhotonTriggerML::NeuralNetwork::QuantizeWeights()
-{
-    fIsQuantized = true;
-    // Implementation for 8-bit quantization if needed
-}
-
 // ============================================================================
-// PhotonTriggerML Implementation with RADICAL Fixes
+// PhotonTriggerML Implementation
 // ============================================================================
 
 PhotonTriggerML::PhotonTriggerML() :
     fNeuralNetwork(std::make_unique<NeuralNetwork>()),
     fIsTraining(true),
-    fTrainingEpochs(500),  // Many more epochs
-    fTrainingStep(0),
+    fTrainingEpochs(200),
+    fBatchSize(64),
+    fLearningRate(0.001),
+    fLearningRateDecay(0.99),
     fBestValidationLoss(1e9),
     fEpochsSinceImprovement(0),
+    fPatienceEpochs(20),
     fEventCount(0),
     fStationCount(0),
     fPhotonLikeCount(0),
@@ -531,7 +520,7 @@ PhotonTriggerML::PhotonTriggerML() :
     fIsActualPhoton(false),
     fOutputFile(nullptr),
     fMLTree(nullptr),
-    fLogFileName("photon_trigger_ml_radical.log"),
+    fLogFileName("photon_trigger_ml_balanced.log"),
     hPhotonScore(nullptr),
     hPhotonScorePhotons(nullptr),
     hPhotonScoreHadrons(nullptr),
@@ -550,27 +539,32 @@ PhotonTriggerML::PhotonTriggerML() :
     fFalsePositives(0),
     fTrueNegatives(0),
     fFalseNegatives(0),
-    fPhotonThreshold(0.25),  // VERY LOW THRESHOLD
+    fPhotonThreshold(0.5),
+    fAdaptiveThreshold(0.5),
     fEnergyMin(1e18),
     fEnergyMax(1e19),
-    fOutputFileName("photon_trigger_ml_radical.root"),
-    fWeightsFileName("photon_trigger_weights_radical.txt"),
-    fLoadPretrainedWeights(false)
+    fOutputFileName("photon_trigger_ml_balanced.root"),
+    fWeightsFileName("photon_trigger_weights_balanced.txt"),
+    fLoadPretrainedWeights(false),
+    fSaveFeatures(true),
+    fApplyTrigger(true),
+    fNormalizationInitialized(false),
+    fPhotonWeight(1.0),
+    fHadronWeight(1.0)
 {
     fInstance = this;
     
-    // Initialize for 19 features (17 original + 2 derived)
-    fFeatureMeans.resize(19, 0.0);
-    fFeatureStdDevs.resize(19, 1.0);
+    // Initialize feature normalization vectors (20 features)
+    fFeatureMedians.resize(20, 0.0);
+    fFeatureIQRs.resize(20, 1.0);
     
     cout << "\n==========================================" << endl;
-    cout << "PhotonTriggerML Constructor (RADICAL VERSION)" << endl;
-    cout << "EXTREME measures for photon detection:" << endl;
-    cout << "  - 50x photon oversampling" << endl;
-    cout << "  - Focal loss alpha=0.95, gamma=4.0" << endl;
-    cout << "  - Threshold=0.25 (very low)" << endl;
-    cout << "  - Photon weight=100x" << endl;
-    cout << "  - Forced minimum photon rate" << endl;
+    cout << "PhotonTriggerML Constructor (BALANCED)" << endl;
+    cout << "Improved training strategy:" << endl;
+    cout << "  - Balanced batch sampling" << endl;
+    cout << "  - SMOTE-like synthetic samples" << endl;
+    cout << "  - Dynamic threshold adjustment" << endl;
+    cout << "  - Better regularization" << endl;
     cout << "==========================================" << endl;
 }
 
@@ -581,11 +575,35 @@ PhotonTriggerML::~PhotonTriggerML()
 
 VModule::ResultFlag PhotonTriggerML::Init()
 {
-    INFO("PhotonTriggerML::Init() - Starting initialization (RADICAL VERSION)");
+    INFO("PhotonTriggerML::Init() - Starting initialization (BALANCED)");
     
     cout << "\n==========================================" << endl;
-    cout << "PhotonTriggerML Initialization (RADICAL)" << endl;
+    cout << "PhotonTriggerML Initialization" << endl;
     cout << "==========================================" << endl;
+    
+    // Read configuration from XML
+    CentralConfig* cc = CentralConfig::GetInstance();
+    Branch topBranch = cc->GetTopBranch("PhotonTriggerML");
+    
+    if (topBranch.GetChild("EnergyMin")) {
+        topBranch.GetChild("EnergyMin").GetData(fEnergyMin);
+    }
+    if (topBranch.GetChild("EnergyMax")) {
+        topBranch.GetChild("EnergyMax").GetData(fEnergyMax);
+    }
+    if (topBranch.GetChild("PhotonThreshold")) {
+        topBranch.GetChild("PhotonThreshold").GetData(fPhotonThreshold);
+        fAdaptiveThreshold = fPhotonThreshold;
+    }
+    if (topBranch.GetChild("OutputFile")) {
+        topBranch.GetChild("OutputFile").GetData(fOutputFileName);
+    }
+    if (topBranch.GetChild("SaveFeatures")) {
+        topBranch.GetChild("SaveFeatures").GetData(fSaveFeatures);
+    }
+    if (topBranch.GetChild("ApplyTrigger")) {
+        topBranch.GetChild("ApplyTrigger").GetData(fApplyTrigger);
+    }
     
     // Open log file
     fLogFile.open(fLogFileName.c_str());
@@ -596,19 +614,19 @@ VModule::ResultFlag PhotonTriggerML::Init()
     
     time_t now = time(0);
     fLogFile << "==========================================" << endl;
-    fLogFile << "PhotonTriggerML RADICAL Version Log" << endl;
+    fLogFile << "PhotonTriggerML BALANCED Version Log" << endl;
     fLogFile << "Date: " << ctime(&now);
-    fLogFile << "EXTREME parameters:" << endl;
-    fLogFile << "  - Photon threshold: " << fPhotonThreshold << endl;
-    fLogFile << "  - Focal loss alpha: 0.95" << endl;
-    fLogFile << "  - Focal loss gamma: 4.0" << endl;
-    fLogFile << "  - Photon oversampling: 50x" << endl;
-    fLogFile << "  - Photon weight: 100x" << endl;
+    fLogFile << "Configuration:" << endl;
+    fLogFile << "  - Energy range: " << fEnergyMin/1e18 << " - " << fEnergyMax/1e18 << " EeV" << endl;
+    fLogFile << "  - Initial threshold: " << fPhotonThreshold << endl;
+    fLogFile << "  - Batch size: " << fBatchSize << endl;
+    fLogFile << "  - Learning rate: " << fLearningRate << endl;
     fLogFile << "==========================================" << endl << endl;
     
-    // Initialize neural network with larger capacity
-    cout << "Initializing RADICAL Neural Network..." << endl;
-    fNeuralNetwork->Initialize(19, 32, 20);  // Even larger network
+    // Initialize neural network with better architecture
+    cout << "Initializing Balanced Neural Network..." << endl;
+    std::vector<int> hidden_sizes = {32, 24, 16};  // Deeper network with gradual reduction
+    fNeuralNetwork->Initialize(20, hidden_sizes);  // 20 input features
     
     // Try to load pre-trained weights
     if (fLoadPretrainedWeights && fNeuralNetwork->LoadWeights(fWeightsFileName)) {
@@ -616,7 +634,6 @@ VModule::ResultFlag PhotonTriggerML::Init()
         fIsTraining = false;
     } else {
         cout << "Starting with random weights (training mode)" << endl;
-        cout << "FORCING photon detection through extreme measures!" << endl;
     }
     
     // Create output file
@@ -629,7 +646,7 @@ VModule::ResultFlag PhotonTriggerML::Init()
     
     // Create tree
     cout << "Creating ROOT tree..." << endl;
-    fMLTree = new TTree("MLTree", "PhotonTriggerML Radical Tree");
+    fMLTree = new TTree("MLTree", "PhotonTriggerML Balanced Tree");
     fMLTree->Branch("eventId", &fEventCount, "eventId/I");
     fMLTree->Branch("stationId", &fStationId, "stationId/I");
     fMLTree->Branch("energy", &fEnergy, "energy/D");
@@ -640,18 +657,20 @@ VModule::ResultFlag PhotonTriggerML::Init()
     fMLTree->Branch("primaryType", &fPrimaryType);
     fMLTree->Branch("isActualPhoton", &fIsActualPhoton, "isActualPhoton/O");
     
-    // Feature branches
-    fMLTree->Branch("risetime", &fFeatures.risetime_10_90, "risetime/D");
-    fMLTree->Branch("pulseWidth", &fFeatures.pulse_width, "pulseWidth/D");
-    fMLTree->Branch("asymmetry", &fFeatures.asymmetry, "asymmetry/D");
-    fMLTree->Branch("peakChargeRatio", &fFeatures.peak_charge_ratio, "peakChargeRatio/D");
+    if (fSaveFeatures) {
+        fMLTree->Branch("risetime", &fFeatures.risetime_10_90, "risetime/D");
+        fMLTree->Branch("pulseWidth", &fFeatures.pulse_width, "pulseWidth/D");
+        fMLTree->Branch("asymmetry", &fFeatures.asymmetry, "asymmetry/D");
+        fMLTree->Branch("peakChargeRatio", &fFeatures.peak_charge_ratio, "peakChargeRatio/D");
+        fMLTree->Branch("kurtosis", &fFeatures.kurtosis, "kurtosis/D");
+    }
     
     // Create histograms
     cout << "Creating histograms..." << endl;
-    hPhotonScore = new TH1D("hPhotonScore", "ML Photon Score (All);Score;Count", 50, 0, 1);
-    hPhotonScorePhotons = new TH1D("hPhotonScorePhotons", "ML Score (True Photons);Score;Count", 50, 0, 1);
+    hPhotonScore = new TH1D("hPhotonScore", "ML Photon Score (All);Score;Count", 100, 0, 1);
+    hPhotonScorePhotons = new TH1D("hPhotonScorePhotons", "ML Score (True Photons);Score;Count", 100, 0, 1);
     hPhotonScorePhotons->SetLineColor(kBlue);
-    hPhotonScoreHadrons = new TH1D("hPhotonScoreHadrons", "ML Score (True Hadrons);Score;Count", 50, 0, 1);
+    hPhotonScoreHadrons = new TH1D("hPhotonScoreHadrons", "ML Score (True Hadrons);Score;Count", 100, 0, 1);
     hPhotonScoreHadrons->SetLineColor(kRed);
     hConfidence = new TH1D("hConfidence", "ML Confidence;|Score - 0.5|;Count", 50, 0, 0.5);
     hRisetime = new TH1D("hRisetime", "Rise Time 10-90%;Time [ns];Count", 50, 0, 1000);
@@ -662,7 +681,6 @@ VModule::ResultFlag PhotonTriggerML::Init()
     hScoreVsDistance = new TH2D("hScoreVsDistance", "Score vs Distance;Distance [m];Score", 
                                 50, 0, 3000, 50, 0, 1);
     
-    // Create confusion matrix histogram
     hConfusionMatrix = new TH2D("hConfusionMatrix", "Confusion Matrix;Predicted;Actual", 
                                 2, -0.5, 1.5, 2, -0.5, 1.5);
     hConfusionMatrix->GetXaxis()->SetBinLabel(1, "Hadron");
@@ -670,18 +688,18 @@ VModule::ResultFlag PhotonTriggerML::Init()
     hConfusionMatrix->GetYaxis()->SetBinLabel(1, "Hadron");
     hConfusionMatrix->GetYaxis()->SetBinLabel(2, "Photon");
     
-    // Create training progress histograms
-    hTrainingLoss = new TH1D("hTrainingLoss", "Training Loss;Batch;Loss", 1000, 0, 1000);
-    hValidationLoss = new TH1D("hValidationLoss", "Validation Loss;Batch;Loss", 1000, 0, 1000);
-    hAccuracyHistory = new TH1D("hAccuracyHistory", "Accuracy History;Batch;Accuracy [%]", 1000, 0, 1000);
+    hTrainingLoss = new TH1D("hTrainingLoss", "Training Loss;Epoch;Loss", 500, 0, 500);
+    hValidationLoss = new TH1D("hValidationLoss", "Validation Loss;Epoch;Loss", 500, 0, 500);
+    hAccuracyHistory = new TH1D("hAccuracyHistory", "Accuracy History;Epoch;Accuracy [%]", 500, 0, 500);
     
+    // Register signal handler
     signal(SIGINT, PhotonTriggerMLSignalHandler);
     signal(SIGTSTP, PhotonTriggerMLSignalHandler);
     
     cout << "Initialization complete!" << endl;
     cout << "==========================================" << endl << endl;
     
-    INFO("PhotonTriggerML initialized successfully (RADICAL VERSION)");
+    INFO("PhotonTriggerML initialized successfully");
     
     return eSuccess;
 }
@@ -695,9 +713,9 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
     
     // Print header every 50 events
     if (fEventCount % 50 == 1) {
-        cout << "\n┌────────┬──────────┬─────────┬─────────┬─────────┬─────────┬─────────┐" << endl;
+        cout << "\n┌────────┬──────────┬─────────┬─────────┬──────────┬─────────┬─────────┐" << endl;
         cout << "│ Event  │ Stations │ Photon% │ Accuracy│ Precision│ Recall  │ F1-Score│" << endl;
-        cout << "├────────┼──────────┼─────────┼─────────┼─────────┼─────────┼─────────┤" << endl;
+        cout << "├────────┼──────────┼─────────┼─────────┼──────────┼─────────┼─────────┤" << endl;
     }
     
     // Get shower information
@@ -711,6 +729,12 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
     if (event.HasSimShower()) {
         const ShowerSimData& shower = event.GetSimShower();
         fEnergy = shower.GetEnergy();
+        
+        // Skip events outside energy range
+        if (fEnergy < fEnergyMin || fEnergy > fEnergyMax) {
+            return eSuccess;
+        }
+        
         fPrimaryId = shower.GetPrimaryParticle();
         
         switch(fPrimaryId) {
@@ -721,8 +745,6 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
             default: fPrimaryType = (fPrimaryId > 1000000000) ? "nucleus" : "unknown";
         }
         
-        fParticleTypeCounts[fPrimaryType]++;
-        
         if (shower.GetNSimCores() > 0) {
             const Detector& detector = Detector::GetInstance();
             const utl::CoordinateSystemPtr& siteCS = detector.GetSiteCoordinateSystem();
@@ -732,12 +754,11 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
         }
         
         // Print first few events for debugging
-        if (fEventCount <= 5) {
+        if (fEventCount <= 3) {
             cout << "\nEvent " << fEventCount 
                  << ": Energy=" << fEnergy/1e18 << " EeV"
                  << ", Primary=" << fPrimaryType 
-                 << " (ID=" << fPrimaryId << ")" 
-                 << " [RADICAL MODE ACTIVE]" << endl;
+                 << " (ID=" << fPrimaryId << ")" << endl;
         }
     }
     
@@ -753,7 +774,49 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
         }
     }
     
-    // Update performance metrics and display
+    // Train network periodically with balanced batches
+    if (fIsTraining && fEventCount % 10 == 0) {
+        // Generate synthetic samples if needed
+        if (fPhotonFeatures.size() < 100 && fPhotonFeatures.size() > 10) {
+            GenerateSyntheticPhotons();
+        }
+        
+        // Train if we have enough samples
+        if (fPhotonFeatures.size() >= 20 && fHadronFeatures.size() >= 20) {
+            double val_loss = TrainNetwork();
+            
+            int epoch = fEventCount / 10;
+            hTrainingLoss->SetBinContent(epoch, val_loss);
+            
+            // Update adaptive threshold periodically
+            if (epoch % 10 == 0) {
+                UpdateThreshold();
+            }
+            
+            // Calculate current accuracy
+            int correct = fTruePositives + fTrueNegatives;
+            int total = fTruePositives + fTrueNegatives + fFalsePositives + fFalseNegatives;
+            if (total > 0) {
+                double accuracy = 100.0 * correct / total;
+                hAccuracyHistory->SetBinContent(epoch, accuracy);
+            }
+            
+            // Early stopping
+            if (val_loss < fBestValidationLoss) {
+                fBestValidationLoss = val_loss;
+                fEpochsSinceImprovement = 0;
+                fNeuralNetwork->SaveWeights("best_" + fWeightsFileName);
+            } else {
+                fEpochsSinceImprovement++;
+                if (fEpochsSinceImprovement > fPatienceEpochs) {
+                    cout << "  [Early stopping triggered]" << endl;
+                    fIsTraining = false;
+                }
+            }
+        }
+    }
+    
+    // Update metrics display
     if (fEventCount % 10 == 0) {
         CalculateAndDisplayMetrics();
         
@@ -762,38 +825,6 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
         hConfusionMatrix->SetBinContent(2, 1, fFalsePositives);
         hConfusionMatrix->SetBinContent(1, 2, fFalseNegatives);
         hConfusionMatrix->SetBinContent(2, 2, fTruePositives);
-    }
-    
-    // Train network with EXTREME strategy
-    if (fIsTraining && fTrainingFeatures.size() >= 32 && fEventCount % 5 == 0) {  // Train more frequently
-        double val_loss = TrainNetwork();
-        
-        int batch_num = fEventCount / 5;
-        hTrainingLoss->SetBinContent(batch_num, val_loss);
-        
-        // Calculate current accuracy for history
-        int correct = fTruePositives + fTrueNegatives;
-        int total = fTruePositives + fTrueNegatives + fFalsePositives + fFalseNegatives;
-        if (total > 0) {
-            double accuracy = 100.0 * correct / total;
-            hAccuracyHistory->SetBinContent(batch_num, accuracy);
-        }
-        
-        // Save best model
-        if (val_loss < fBestValidationLoss) {
-            fBestValidationLoss = val_loss;
-            fEpochsSinceImprovement = 0;
-            fNeuralNetwork->SaveWeights("best_" + fWeightsFileName);
-            cout << "  [New best model saved!]" << endl;
-        } else {
-            fEpochsSinceImprovement++;
-        }
-        
-        // Very patient early stopping
-        if (fEpochsSinceImprovement > 100) {
-            cout << "  [Early stopping triggered after 100 epochs without improvement]" << endl;
-            fIsTraining = false;
-        }
     }
     
     return eSuccess;
@@ -841,126 +872,54 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
         // Extract features
         fFeatures = ExtractEnhancedFeatures(trace_data);
         
-        // Add derived physics features
-        double muon_likelihood = fFeatures.falltime_90_10 / (fFeatures.risetime_10_90 + 1);
-        double em_likelihood = fFeatures.peak_charge_ratio * (1.0 - abs(fFeatures.asymmetry));
-        
-        // Physics-based discrimination
-        bool physicsPhotonLike = false;
-        if (fFeatures.risetime_10_90 < 200 &&  // Relaxed criteria
-            fFeatures.pulse_width < 400 &&      
-            fFeatures.secondary_peak_ratio < 0.4 && 
-            fFeatures.peak_charge_ratio > 0.1) {
-            physicsPhotonLike = true;
-        }
-        
-        // STRONG PHYSICS BIAS
-        double physics_bias = 0;
-        if (physicsPhotonLike) {
-            physics_bias = 0.2;  // Strong boost for physics-consistent patterns
-        }
-        if (fIsActualPhoton) {
-            physics_bias += 0.1;  // Extra boost if we know it's a photon (for training)
-        }
-        
         // Fill feature histograms
         hRisetime->Fill(fFeatures.risetime_10_90);
         hAsymmetry->Fill(fFeatures.asymmetry);
         hKurtosis->Fill(fFeatures.kurtosis);
         
-        // Update feature statistics
-        UpdateFeatureStatistics(fFeatures);
+        // Update feature statistics if needed
+        if (!fNormalizationInitialized && fStationCount > 100) {
+            UpdateFeatureStatistics(fFeatures);
+            if (fStationCount == 200) {
+                fNormalizationInitialized = true;
+                cout << "Feature normalization initialized after 200 samples" << endl;
+            }
+        }
         
-        // Normalize features including derived ones
+        // Normalize features
         std::vector<double> normalized = NormalizeFeatures(fFeatures);
         
-        // Add normalized derived features
-        normalized.push_back(muon_likelihood / 10.0);
-        normalized.push_back(em_likelihood);
-        
         // Get ML prediction
-        double ml_score = fNeuralNetwork->Predict(normalized, false);
-        
-        // Apply physics bias
-        fPhotonScore = ml_score + physics_bias;
-        
-        // RADICAL: Force some random predictions to be photon to ensure learning
-        static int forcedPhotonCounter = 0;
-        if (fIsTraining && forcedPhotonCounter++ % 20 == 0) {  // Force 5% to be photon
-            fPhotonScore = 0.6 + (rand() / double(RAND_MAX)) * 0.4;  // Random high score
-        }
-        
-        fPhotonScore = max(0.0, min(1.0, fPhotonScore));  // Clip to [0,1]
-        
+        fPhotonScore = fNeuralNetwork->Predict(normalized, false);
         fConfidence = abs(fPhotonScore - 0.5);
         
-        // DEBUGGING: Print ALL scores for first 100 stations
-        if (fStationCount < 100) {
-            cout << "  Station " << fStationId 
-                 << " Actual: " << (fIsActualPhoton ? "★PHOTON★" : "hadron")
-                 << " Score: " << fixed << setprecision(3) << fPhotonScore
-                 << " ML: " << ml_score
-                 << " Physics: " << (physicsPhotonLike ? "Y" : "N")
-                 << " Rise: " << fFeatures.risetime_10_90 << "ns" << endl;
-        }
-        
-        // EXTREME TRAINING DATA COLLECTION
-        bool isValidation = (fStationCount % 10 == 0);
+        // Store training data with balanced sampling
         if (fIsTraining) {
-            if (!isValidation) {
-                if (fIsActualPhoton) {
-                    // EXTREME OVERSAMPLING for photons (50x)
-                    std::random_device rd;
-                    std::mt19937 gen(rd());
-                    
-                    for (int copy = 0; copy < 50; copy++) {  // 50x oversampling!
-                        std::vector<double> varied = normalized;
-                        
-                        // Add varying levels of augmentation
-                        std::normal_distribution<> noise(0, 0.01 * (1 + copy / 10.0));
-                        
-                        for (auto& val : varied) {
-                            val += noise(gen);
-                            val = max(0.0, min(1.0, val));
-                        }
-                        
-                        fTrainingFeatures.push_back(varied);
-                        fTrainingLabels.push_back(1);
-                    }
-                    
-                    // Extra copies for physics-consistent photons
-                    if (physicsPhotonLike) {
-                        for (int extra = 0; extra < 20; extra++) {
-                            fTrainingFeatures.push_back(normalized);
-                            fTrainingLabels.push_back(1);
-                        }
-                    }
-                } else if (physicsPhotonLike && !fIsActualPhoton) {
-                    // Important false positives - include for learning
-                    for (int copy = 0; copy < 5; copy++) {
-                        fTrainingFeatures.push_back(normalized);
-                        fTrainingLabels.push_back(0);
-                    }
-                } else if (rand() % 20 == 0) {  // Only 5% of regular hadrons
-                    fTrainingFeatures.push_back(normalized);
-                    fTrainingLabels.push_back(0);
-                }
+            bool isValidation = (fStationCount % 10 == 0);
+            
+            if (isValidation) {
+                fValidationFeatures.push_back(normalized);
+                fValidationLabels.push_back(fIsActualPhoton ? 1 : 0);
             } else {
-                // Validation set - no augmentation but still oversample photons
                 if (fIsActualPhoton) {
-                    for (int i = 0; i < 10; i++) {
-                        fValidationFeatures.push_back(normalized);
-                        fValidationLabels.push_back(1);
+                    fPhotonFeatures.push_back(normalized);
+                    if (fPhotonFeatures.size() > kMaxPhotonBuffer) {
+                        fPhotonFeatures.pop_front();
                     }
-                } else if (rand() % 10 == 0) {
-                    fValidationFeatures.push_back(normalized);
-                    fValidationLabels.push_back(0);
+                } else {
+                    // Subsample hadrons to maintain balance
+                    if (rand() % 100 < 10) {  // Keep 10% of hadrons
+                        fHadronFeatures.push_back(normalized);
+                        if (fHadronFeatures.size() > kMaxHadronBuffer) {
+                            fHadronFeatures.pop_front();
+                        }
+                    }
                 }
             }
         }
         
         fStationCount++;
-        bool identifiedAsPhoton = (fPhotonScore > fPhotonThreshold);  // 0.25 threshold
+        bool identifiedAsPhoton = (fPhotonScore > fAdaptiveThreshold);
         
         // Store ML result
         MLResult mlResult;
@@ -976,19 +935,12 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
         // Update counters
         if (identifiedAsPhoton) {
             fPhotonLikeCount++;
-            if (fIsActualPhoton) {
-                fTruePositives++;
-                cout << "  ★★★ TRUE POSITIVE #" << fTruePositives << " ★★★" << endl;
-            } else {
-                fFalsePositives++;
-            }
+            if (fIsActualPhoton) fTruePositives++;
+            else fFalsePositives++;
         } else {
             fHadronLikeCount++;
             if (!fIsActualPhoton) fTrueNegatives++;
-            else {
-                fFalseNegatives++;
-                cout << "  ✗✗✗ FALSE NEGATIVE (missed photon) ✗✗✗" << endl;
-            }
+            else fFalseNegatives++;
         }
         
         // Fill histograms
@@ -1005,47 +957,14 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
         hScoreVsDistance->Fill(fDistance, fPhotonScore);
         
         // Fill tree
-        fMLTree->Fill();
+        if (fSaveFeatures) {
+            fMLTree->Fill();
+        }
     }
-}
-
-bool PhotonTriggerML::ExtractTraceData(const sevt::PMT& pmt, std::vector<double>& trace_data)
-{
-    trace_data.clear();
-    
-    // Try direct FADC trace
-    if (pmt.HasFADCTrace()) {
-        try {
-            const auto& trace = pmt.GetFADCTrace(sdet::PMTConstants::eHighGain);
-            for (int i = 0; i < 2048; i++) {
-                trace_data.push_back(trace[i]);
-            }
-            return true;
-        } catch (...) {}
-    }
-    
-    // Try simulation data
-    if (pmt.HasSimData()) {
-        try {
-            const sevt::PMTSimData& simData = pmt.GetSimData();
-            if (simData.HasFADCTrace(sevt::StationConstants::eTotal)) {
-                const auto& fadcTrace = simData.GetFADCTrace(
-                    sdet::PMTConstants::eHighGain,
-                    sevt::StationConstants::eTotal
-                );
-                for (int i = 0; i < 2048; i++) {
-                    trace_data.push_back(fadcTrace[i]);
-                }
-                return true;
-            }
-        } catch (...) {}
-    }
-    
-    return false;
 }
 
 PhotonTriggerML::EnhancedFeatures PhotonTriggerML::ExtractEnhancedFeatures(
-    const std::vector<double>& trace, double /* baseline */)
+    const std::vector<double>& trace, double baseline)
 {
     EnhancedFeatures features;
     const int trace_size = trace.size();
@@ -1059,11 +978,14 @@ PhotonTriggerML::EnhancedFeatures PhotonTriggerML::ExtractEnhancedFeatures(
     std::vector<double> signal(trace_size);
     
     // Baseline estimation from first 100 bins
-    double estimated_baseline = 0;
-    for (int i = 0; i < 100; i++) {
-        estimated_baseline += trace[i];
+    double estimated_baseline = baseline;
+    if (baseline <= 0) {
+        estimated_baseline = 0;
+        for (int i = 0; i < min(100, trace_size); i++) {
+            estimated_baseline += trace[i];
+        }
+        estimated_baseline /= min(100, trace_size);
     }
-    estimated_baseline /= 100.0;
     
     for (int i = 0; i < trace_size; i++) {
         signal[i] = trace[i] - estimated_baseline;
@@ -1083,6 +1005,7 @@ PhotonTriggerML::EnhancedFeatures PhotonTriggerML::ExtractEnhancedFeatures(
     features.peak_amplitude = peak_value / ADC_PER_VEM;
     features.total_charge = total_signal / ADC_PER_VEM;
     features.peak_charge_ratio = features.peak_amplitude / (features.total_charge + 0.001);
+    features.peak_time = peak_bin * NS_PER_BIN;
     
     // Calculate rise and fall times
     double peak_10 = 0.1 * peak_value;
@@ -1115,6 +1038,9 @@ PhotonTriggerML::EnhancedFeatures PhotonTriggerML::ExtractEnhancedFeatures(
     features.risetime_10_50 = abs(bin_50_rise - bin_10_rise) * NS_PER_BIN;
     features.risetime_10_90 = abs(bin_90_rise - bin_10_rise) * NS_PER_BIN;
     features.falltime_90_10 = abs(bin_10_fall - bin_90_fall) * NS_PER_BIN;
+    
+    // Rise/fall ratio (important for photon discrimination)
+    features.rise_fall_ratio = features.risetime_10_90 / (features.falltime_90_10 + 1.0);
     
     // Calculate pulse width (FWHM)
     double half_max = peak_value / 2.0;
@@ -1180,8 +1106,9 @@ PhotonTriggerML::EnhancedFeatures PhotonTriggerML::ExtractEnhancedFeatures(
     
     features.early_fraction = early_charge / (total_signal + 0.001);
     features.late_fraction = late_charge / (total_signal + 0.001);
+    features.charge_asymmetry = (early_charge - late_charge) / (early_charge + late_charge + 0.001);
     
-    // Smoothness
+    // Smoothness (second derivative RMS)
     double sum_sq_diff = 0;
     int smooth_count = 0;
     
@@ -1195,7 +1122,7 @@ PhotonTriggerML::EnhancedFeatures PhotonTriggerML::ExtractEnhancedFeatures(
     
     features.smoothness = sqrt(sum_sq_diff / (smooth_count + 1));
     
-    // High frequency content
+    // High frequency content (simplified)
     double high_freq = 0;
     for (int i = 1; i < trace_size - 1; i++) {
         double diff = signal[i+1] - signal[i-1];
@@ -1224,54 +1151,11 @@ PhotonTriggerML::EnhancedFeatures PhotonTriggerML::ExtractEnhancedFeatures(
     return features;
 }
 
-void PhotonTriggerML::UpdateFeatureStatistics(const EnhancedFeatures& features)
-{
-    std::vector<double> raw = {
-        features.risetime_10_50,
-        features.risetime_10_90,
-        features.falltime_90_10,
-        features.pulse_width,
-        features.asymmetry,
-        features.peak_amplitude,
-        features.total_charge,
-        features.peak_charge_ratio,
-        features.smoothness,
-        features.kurtosis,
-        features.skewness,
-        features.early_fraction,
-        features.late_fraction,
-        features.time_spread,
-        features.high_freq_content,
-        static_cast<double>(features.num_peaks),
-        features.secondary_peak_ratio
-    };
-    
-    // Add derived features
-    double muon_likelihood = features.falltime_90_10 / (features.risetime_10_90 + 1);
-    double em_likelihood = features.peak_charge_ratio * (1.0 - abs(features.asymmetry));
-    raw.push_back(muon_likelihood);
-    raw.push_back(em_likelihood);
-    
-    static int n = 0;
-    n++;
-    
-    // Online mean and variance calculation (Welford's algorithm)
-    for (size_t i = 0; i < raw.size(); ++i) {
-        double delta = raw[i] - fFeatureMeans[i];
-        fFeatureMeans[i] += delta / n;
-        double delta2 = raw[i] - fFeatureMeans[i];
-        if (n > 1) {
-            double var = fFeatureStdDevs[i] * fFeatureStdDevs[i] * (n - 2) + delta * delta2;
-            fFeatureStdDevs[i] = sqrt(var / (n - 1));
-        }
-        if (fFeatureStdDevs[i] < 0.001) fFeatureStdDevs[i] = 1.0;
-    }
-}
-
 std::vector<double> PhotonTriggerML::NormalizeFeatures(const EnhancedFeatures& features)
 {
     std::vector<double> normalized;
     
+    // Collect all features
     std::vector<double> raw = {
         features.risetime_10_50,
         features.risetime_10_90,
@@ -1289,133 +1173,162 @@ std::vector<double> PhotonTriggerML::NormalizeFeatures(const EnhancedFeatures& f
         features.time_spread,
         features.high_freq_content,
         static_cast<double>(features.num_peaks),
-        features.secondary_peak_ratio
+        features.secondary_peak_ratio,
+        features.rise_fall_ratio,
+        features.peak_time,
+        features.charge_asymmetry
     };
     
-    // Robust min-max normalization to [0,1]
-    std::vector<double> mins = {0, 0, 0, 0, -1, 0, 0, 0, 0, -5, -5, 0, 0, 0, 0, 0, 0};
-    std::vector<double> maxs = {500, 1000, 1000, 1000, 1, 10, 100, 1, 100, 20, 5, 1, 1, 1000, 10, 10, 1};
-    
-    for (size_t i = 0; i < raw.size(); ++i) {
-        double val = (raw[i] - mins[i]) / (maxs[i] - mins[i] + 0.001);
-        val = max(0.0, min(1.0, val));  // Clip to [0,1]
-        normalized.push_back(val);
+    // Use robust scaling if initialized, otherwise use fixed ranges
+    if (fNormalizationInitialized) {
+        for (size_t i = 0; i < raw.size(); ++i) {
+            double val = (raw[i] - fFeatureMedians[i]) / (fFeatureIQRs[i] + 0.001);
+            val = max(-3.0, min(3.0, val));  // Clip to [-3, 3]
+            val = (val + 3.0) / 6.0;  // Scale to [0, 1]
+            normalized.push_back(val);
+        }
+    } else {
+        // Use fixed normalization ranges
+        std::vector<double> mins = {0, 0, 0, 0, -1, 0, 0, 0, 0, -5, -5, 0, 0, 0, 0, 0, 0, 0, 0, -1};
+        std::vector<double> maxs = {500, 1000, 1000, 1000, 1, 10, 100, 1, 100, 20, 5, 1, 1, 1000, 10, 10, 1, 2, 50000, 1};
+        
+        for (size_t i = 0; i < raw.size(); ++i) {
+            double val = (raw[i] - mins[i]) / (maxs[i] - mins[i] + 0.001);
+            val = max(0.0, min(1.0, val));
+            normalized.push_back(val);
+        }
     }
     
     return normalized;
 }
 
-double PhotonTriggerML::TrainNetwork()
+void PhotonTriggerML::UpdateFeatureStatistics(const EnhancedFeatures& features)
 {
-    if (fTrainingFeatures.empty()) return 1e9;
+    static std::vector<std::vector<double>> feature_buffer;
     
-    cout << "\n  RADICAL Training with " << fTrainingFeatures.size() << " samples...";
+    std::vector<double> raw = {
+        features.risetime_10_50,
+        features.risetime_10_90,
+        features.falltime_90_10,
+        features.pulse_width,
+        features.asymmetry,
+        features.peak_amplitude,
+        features.total_charge,
+        features.peak_charge_ratio,
+        features.smoothness,
+        features.kurtosis,
+        features.skewness,
+        features.early_fraction,
+        features.late_fraction,
+        features.time_spread,
+        features.high_freq_content,
+        static_cast<double>(features.num_peaks),
+        features.secondary_peak_ratio,
+        features.rise_fall_ratio,
+        features.peak_time,
+        features.charge_asymmetry
+    };
     
-    // Count classes in training data
-    int num_photons_total = std::count(fTrainingLabels.begin(), fTrainingLabels.end(), 1);
-    int num_hadrons_total = fTrainingLabels.size() - num_photons_total;
+    feature_buffer.push_back(raw);
     
-    cout << " (P:" << num_photons_total << " H:" << num_hadrons_total << ")";
-    
-    // Create EXTREMELY balanced batch
-    std::vector<std::vector<double>> batch_features;
-    std::vector<int> batch_labels;
-    
-    // Collect indices for each class
-    std::vector<int> photon_indices, hadron_indices;
-    for (size_t i = 0; i < fTrainingLabels.size(); ++i) {
-        if (fTrainingLabels[i] == 1) {
-            photon_indices.push_back(i);
-        } else {
-            hadron_indices.push_back(i);
+    // Calculate medians and IQRs when we have enough samples
+    if (feature_buffer.size() == 200) {
+        for (size_t i = 0; i < raw.size(); ++i) {
+            std::vector<double> feature_values;
+            for (const auto& sample : feature_buffer) {
+                feature_values.push_back(sample[i]);
+            }
+            
+            std::sort(feature_values.begin(), feature_values.end());
+            
+            // Calculate median
+            size_t n = feature_values.size();
+            fFeatureMedians[i] = feature_values[n/2];
+            
+            // Calculate IQR (75th percentile - 25th percentile)
+            double q1 = feature_values[n/4];
+            double q3 = feature_values[3*n/4];
+            fFeatureIQRs[i] = q3 - q1;
+            
+            if (fFeatureIQRs[i] < 0.001) fFeatureIQRs[i] = 1.0;
         }
     }
+}
+
+double PhotonTriggerML::TrainNetwork()
+{
+    if (fPhotonFeatures.empty() || fHadronFeatures.empty()) return 1e9;
     
-    // Randomly sample from each class
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::shuffle(photon_indices.begin(), photon_indices.end(), gen);
-    std::shuffle(hadron_indices.begin(), hadron_indices.end(), gen);
+    // Create balanced batch
+    std::vector<std::vector<double>> batch_features;
+    std::vector<int> batch_labels;
+    std::vector<double> batch_weights;
     
-    // FORCE at least 50% photons in batch
-    int batch_size_photons = max(16, min(32, (int)photon_indices.size()));
-    int batch_size_hadrons = min(batch_size_photons, (int)hadron_indices.size());  // Equal or fewer hadrons
+    // Calculate class weights based on current imbalance
+    double photon_ratio = double(fPhotonFeatures.size()) / 
+                         (fPhotonFeatures.size() + fHadronFeatures.size());
+    fPhotonWeight = 0.5 / (photon_ratio + 0.001);
+    fHadronWeight = 0.5 / (1.0 - photon_ratio + 0.001);
     
-    for (int i = 0; i < batch_size_photons; ++i) {
-        batch_features.push_back(fTrainingFeatures[photon_indices[i % photon_indices.size()]]);
+    // Sample equal numbers from each class
+    int samples_per_class = min(fBatchSize / 2, 
+                               min((int)fPhotonFeatures.size(), (int)fHadronFeatures.size()));
+    
+    // Randomly sample photons
+    std::vector<int> photon_indices(fPhotonFeatures.size());
+    std::iota(photon_indices.begin(), photon_indices.end(), 0);
+    std::random_shuffle(photon_indices.begin(), photon_indices.end());
+    
+    for (int i = 0; i < samples_per_class; ++i) {
+        batch_features.push_back(fPhotonFeatures[photon_indices[i]]);
         batch_labels.push_back(1);
+        batch_weights.push_back(fPhotonWeight);
     }
     
-    for (int i = 0; i < batch_size_hadrons; ++i) {
-        batch_features.push_back(fTrainingFeatures[hadron_indices[i]]);
+    // Randomly sample hadrons
+    std::vector<int> hadron_indices(fHadronFeatures.size());
+    std::iota(hadron_indices.begin(), hadron_indices.end(), 0);
+    std::random_shuffle(hadron_indices.begin(), hadron_indices.end());
+    
+    for (int i = 0; i < samples_per_class; ++i) {
+        batch_features.push_back(fHadronFeatures[hadron_indices[i]]);
         batch_labels.push_back(0);
+        batch_weights.push_back(fHadronWeight);
     }
     
     // Shuffle the batch
     std::vector<int> batch_indices(batch_features.size());
     std::iota(batch_indices.begin(), batch_indices.end(), 0);
-    std::shuffle(batch_indices.begin(), batch_indices.end(), gen);
+    std::random_shuffle(batch_indices.begin(), batch_indices.end());
     
     std::vector<std::vector<double>> shuffled_features;
     std::vector<int> shuffled_labels;
+    std::vector<double> shuffled_weights;
+    
     for (int idx : batch_indices) {
         shuffled_features.push_back(batch_features[idx]);
         shuffled_labels.push_back(batch_labels[idx]);
+        shuffled_weights.push_back(batch_weights[idx]);
     }
     
-    cout << " Batch(P:" << batch_size_photons << " H:" << batch_size_hadrons << ")";
+    // Train with current learning rate
+    double current_lr = fLearningRate * pow(fLearningRateDecay, fEventCount / 100);
+    double train_loss = fNeuralNetwork->Train(shuffled_features, shuffled_labels, 
+                                              shuffled_weights, current_lr);
     
-    // HIGH learning rate with warmup
-    double base_lr = 0.01;  // High learning rate
-    double min_lr = 0.001;
-    double warmup_steps = 10;
-    double learning_rate;
-    
-    if (fTrainingStep < warmup_steps) {
-        // Warmup phase
-        learning_rate = min_lr + (base_lr - min_lr) * (fTrainingStep / warmup_steps);
-    } else {
-        // Cosine annealing
-        double cosine_factor = 0.5 * (1 + cos(M_PI * (fTrainingStep - warmup_steps) / 300.0));
-        learning_rate = min_lr + (base_lr - min_lr) * cosine_factor;
-    }
-    
-    // Train for MANY epochs on this batch to force learning
-    double total_loss = 0;
-    for (int epoch = 0; epoch < 10; epoch++) {  // Many epochs per batch
-        double loss = fNeuralNetwork->Train(shuffled_features, shuffled_labels, learning_rate);
-        total_loss += loss;
-    }
-    double train_loss = total_loss / 10.0;
-    
-    cout << " Loss: " << fixed << setprecision(4) << train_loss;
-    cout << " LR: " << setprecision(5) << learning_rate;
-    
-    // Calculate validation metrics
-    double val_loss = 0;
+    // Calculate validation loss if we have validation data
+    double val_loss = train_loss;
     if (!fValidationFeatures.empty()) {
+        val_loss = 0;
         int correct = 0;
-        int val_tp = 0, val_fp = 0, val_tn = 0, val_fn = 0;
         
         for (size_t i = 0; i < fValidationFeatures.size(); ++i) {
             double pred = fNeuralNetwork->Predict(fValidationFeatures[i], false);
             int label = fValidationLabels[i];
             
-            // Focal loss for validation
-            double p = pred;
-            double pt = label ? p : (1 - p);
-            double alpha = 0.95;
-            double gamma = 4.0;
-            double alpha_t = label ? alpha : (1 - alpha);
-            double focal_weight = alpha_t * pow(1 - pt, gamma);
-            val_loss -= focal_weight * (label * log(p + 1e-7) + (1 - label) * log(1 - p + 1e-7));
+            val_loss -= (label * log(pred + 1e-7) + (1 - label) * log(1 - pred + 1e-7));
             
-            bool predicted = (pred > fPhotonThreshold);
-            if (predicted && label) val_tp++;
-            else if (predicted && !label) val_fp++;
-            else if (!predicted && label) val_fn++;
-            else if (!predicted && !label) val_tn++;
-            
+            bool predicted = (pred > fAdaptiveThreshold);
             if ((predicted && label) || (!predicted && !label)) {
                 correct++;
             }
@@ -1423,39 +1336,67 @@ double PhotonTriggerML::TrainNetwork()
         
         val_loss /= fValidationFeatures.size();
         double val_acc = 100.0 * correct / fValidationFeatures.size();
-        double val_precision = (val_tp + val_fp > 0) ? 100.0 * val_tp / (val_tp + val_fp) : 0;
-        double val_recall = (val_tp + val_fn > 0) ? 100.0 * val_tp / (val_tp + val_fn) : 0;
         
-        cout << " Val: " << val_loss 
-             << " (Acc: " << val_acc << "%"
-             << " Prec: " << val_precision << "%"
-             << " Rec: " << val_recall << "%"
-             << " TP:" << val_tp << " FP:" << val_fp << ")";
-        
-        int batch_num = fEventCount / 5;
-        hValidationLoss->SetBinContent(batch_num, val_loss);
+        cout << "  Training - Loss: " << fixed << setprecision(4) << train_loss
+             << ", Val Loss: " << val_loss
+             << ", Val Acc: " << val_acc << "%"
+             << ", LR: " << setprecision(5) << current_lr << endl;
     }
-    
-    cout << endl;
-    
-    // Keep larger data buffer
-    if (fTrainingFeatures.size() > 10000) {
-        fTrainingFeatures.erase(fTrainingFeatures.begin(), 
-                               fTrainingFeatures.begin() + 2000);
-        fTrainingLabels.erase(fTrainingLabels.begin(), 
-                             fTrainingLabels.begin() + 2000);
-    }
-    
-    if (fValidationFeatures.size() > 2000) {
-        fValidationFeatures.erase(fValidationFeatures.begin(),
-                                 fValidationFeatures.begin() + 500);
-        fValidationLabels.erase(fValidationLabels.begin(),
-                               fValidationLabels.begin() + 500);
-    }
-    
-    fTrainingStep++;
     
     return val_loss;
+}
+
+void PhotonTriggerML::GenerateSyntheticPhotons()
+{
+    if (fPhotonFeatures.size() < 10) return;
+    
+    // SMOTE-like synthetic sample generation
+    int num_synthetic = min(100, (int)fHadronFeatures.size() - (int)fPhotonFeatures.size());
+    
+    for (int i = 0; i < num_synthetic; ++i) {
+        // Randomly select two photon samples
+        int idx1 = rand() % fPhotonFeatures.size();
+        int idx2 = rand() % fPhotonFeatures.size();
+        while (idx2 == idx1 && fPhotonFeatures.size() > 1) {
+            idx2 = rand() % fPhotonFeatures.size();
+        }
+        
+        // Create synthetic sample by interpolation
+        std::vector<double> synthetic(fPhotonFeatures[idx1].size());
+        double alpha = (rand() / double(RAND_MAX)) * 0.5 + 0.25;  // Random between 0.25 and 0.75
+        
+        for (size_t j = 0; j < synthetic.size(); ++j) {
+            synthetic[j] = alpha * fPhotonFeatures[idx1][j] + 
+                          (1 - alpha) * fPhotonFeatures[idx2][j];
+            
+            // Add small noise
+            synthetic[j] += (rand() / double(RAND_MAX) - 0.5) * 0.02;
+            synthetic[j] = max(0.0, min(1.0, synthetic[j]));
+        }
+        
+        fPhotonFeatures.push_back(synthetic);
+    }
+    
+    cout << "  Generated " << num_synthetic << " synthetic photon samples" << endl;
+}
+
+void PhotonTriggerML::UpdateThreshold()
+{
+    if (fValidationFeatures.empty()) return;
+    
+    double new_threshold = fNeuralNetwork->CalculateOptimalThreshold(
+        fValidationFeatures, fValidationLabels);
+    
+    // Smooth update
+    fAdaptiveThreshold = 0.7 * fAdaptiveThreshold + 0.3 * new_threshold;
+    
+    cout << "  Updated adaptive threshold to " << fAdaptiveThreshold << endl;
+    
+    // Log to file
+    if (fLogFile.is_open()) {
+        fLogFile << "Threshold updated at event " << fEventCount 
+                << " to " << fAdaptiveThreshold << endl;
+    }
 }
 
 void PhotonTriggerML::CalculateAndDisplayMetrics()
@@ -1473,19 +1414,14 @@ void PhotonTriggerML::CalculateAndDisplayMetrics()
     double photon_frac = (fPhotonLikeCount + fHadronLikeCount > 0) ?
                         100.0 * fPhotonLikeCount / (fPhotonLikeCount + fHadronLikeCount) : 0;
     
-    // Display in table format with color coding
+    // Display in table format
     cout << "│ " << setw(6) << fEventCount 
          << " │ " << setw(8) << fStationCount
          << " │ " << fixed << setprecision(1) << setw(7) << photon_frac << "%"
          << " │ " << setw(7) << accuracy << "%"
          << " │ " << setw(8) << precision << "%"
          << " │ " << setw(7) << recall << "%"
-         << " │ " << setw(7) << f1 << "%│";
-    
-    if (fTruePositives > 0) {
-        cout << " ★TP=" << fTruePositives;
-    }
-    cout << endl;
+         << " │ " << setw(7) << f1 << "%│" << endl;
     
     // Log to file
     if (fLogFile.is_open()) {
@@ -1494,86 +1430,49 @@ void PhotonTriggerML::CalculateAndDisplayMetrics()
                 << "% Prec: " << precision
                 << "% Rec: " << recall
                 << "% F1: " << f1 
-                << "% TP: " << fTruePositives
+                << "% (TP: " << fTruePositives
                 << " FP: " << fFalsePositives
                 << " TN: " << fTrueNegatives
-                << " FN: " << fFalseNegatives << endl;
-    }
-}
-
-void PhotonTriggerML::CalculatePerformanceMetrics()
-{
-    cout << "\n==========================================" << endl;
-    cout << "PERFORMANCE METRICS (RADICAL VERSION)" << endl;
-    cout << "==========================================" << endl;
-    
-    int total = fTruePositives + fTrueNegatives + fFalsePositives + fFalseNegatives;
-    if (total == 0) {
-        cout << "No predictions made yet!" << endl;
-        return;
-    }
-    
-    double accuracy = 100.0 * (fTruePositives + fTrueNegatives) / total;
-    double precision = (fTruePositives + fFalsePositives > 0) ? 
-                      100.0 * fTruePositives / (fTruePositives + fFalsePositives) : 0;
-    double recall = (fTruePositives + fFalseNegatives > 0) ? 
-                   100.0 * fTruePositives / (fTruePositives + fFalseNegatives) : 0;
-    double f1 = (precision + recall > 0) ? 2 * precision * recall / (precision + recall) : 0;
-    double specificity = (fTrueNegatives + fFalsePositives > 0) ?
-                        100.0 * fTrueNegatives / (fTrueNegatives + fFalsePositives) : 0;
-    
-    cout << "Accuracy:    " << fixed << setprecision(1) << accuracy << "%" << endl;
-    cout << "Precision:   " << precision << "%" << endl;
-    cout << "Recall:      " << recall << "%" << endl;
-    cout << "Specificity: " << specificity << "%" << endl;
-    cout << "F1-Score:    " << f1 << "%" << endl;
-    cout << endl;
-    
-    cout << "CONFUSION MATRIX:" << endl;
-    cout << "                Predicted" << endl;
-    cout << "             Hadron   Photon" << endl;
-    cout << "Actual Hadron  " << setw(6) << fTrueNegatives << "   " << setw(6) << fFalsePositives << endl;
-    cout << "       Photon  " << setw(6) << fFalseNegatives << "   " << setw(6) << fTruePositives << endl;
-    cout << endl;
-    
-    cout << "Total Stations: " << fStationCount << endl;
-    cout << "Photon-like: " << fPhotonLikeCount << " (" 
-         << 100.0 * fPhotonLikeCount / max(1, fPhotonLikeCount + fHadronLikeCount) << "%)" << endl;
-    cout << "Hadron-like: " << fHadronLikeCount << " (" 
-         << 100.0 * fHadronLikeCount / max(1, fPhotonLikeCount + fHadronLikeCount) << "%)" << endl;
-    
-    cout << "\nPARTICLE TYPE BREAKDOWN:" << endl;
-    for (const auto& pair : fParticleTypeCounts) {
-        cout << "  " << pair.first << ": " << pair.second << " events" << endl;
-    }
-    
-    cout << "==========================================" << endl;
-    
-    // Log to file
-    if (fLogFile.is_open()) {
-        fLogFile << "\nFinal Performance Metrics:" << endl;
-        fLogFile << "Accuracy: " << accuracy << "%" << endl;
-        fLogFile << "Precision: " << precision << "%" << endl;
-        fLogFile << "Recall: " << recall << "%" << endl;
-        fLogFile << "Specificity: " << specificity << "%" << endl;
-        fLogFile << "F1-Score: " << f1 << "%" << endl;
-        fLogFile << "True Positives: " << fTruePositives << endl;
-        fLogFile << "False Positives: " << fFalsePositives << endl;
-        fLogFile << "True Negatives: " << fTrueNegatives << endl;
-        fLogFile << "False Negatives: " << fFalseNegatives << endl;
+                << " FN: " << fFalseNegatives << ")" << endl;
     }
 }
 
 void PhotonTriggerML::SaveAndDisplaySummary()
 {
     cout << "\n==========================================" << endl;
-    cout << "PHOTONTRIGGERML FINAL SUMMARY (RADICAL)" << endl;
+    cout << "PHOTONTRIGGERML FINAL SUMMARY (BALANCED)" << endl;
     cout << "==========================================" << endl;
     
     cout << "Events processed: " << fEventCount << endl;
     cout << "Stations analyzed: " << fStationCount << endl;
+    cout << "Final adaptive threshold: " << fAdaptiveThreshold << endl;
     
-    CalculatePerformanceMetrics();
+    // Calculate final metrics
+    int total = fTruePositives + fTrueNegatives + fFalsePositives + fFalseNegatives;
+    if (total > 0) {
+        double accuracy = 100.0 * (fTruePositives + fTrueNegatives) / total;
+        double precision = (fTruePositives + fFalsePositives > 0) ? 
+                          100.0 * fTruePositives / (fTruePositives + fFalsePositives) : 0;
+        double recall = (fTruePositives + fFalseNegatives > 0) ? 
+                       100.0 * fTruePositives / (fTruePositives + fFalseNegatives) : 0;
+        double f1 = (precision + recall > 0) ? 2 * precision * recall / (precision + recall) : 0;
+        double specificity = (fTrueNegatives + fFalsePositives > 0) ?
+                            100.0 * fTrueNegatives / (fTrueNegatives + fFalsePositives) : 0;
+        
+        cout << "\nPERFORMANCE METRICS:" << endl;
+        cout << "Accuracy:    " << fixed << setprecision(1) << accuracy << "%" << endl;
+        cout << "Precision:   " << precision << "%" << endl;
+        cout << "Recall:      " << recall << "%" << endl;
+        cout << "Specificity: " << specificity << "%" << endl;
+        cout << "F1-Score:    " << f1 << "%" << endl;
+        cout << endl;
+        
+        cout << "CONFUSION MATRIX:" << endl;
+        cout << "                Predicted" << endl;
+        cout << "             Hadron   Photon" << endl;
+        cout << "Actual Hadron  " << setw(6) << fTrueNegatives << "   " << setw(6) << fFalsePositives << endl;
+        cout << "       Photon  " << setw(6) << fFalseNegatives << "   " << setw(6) << fTruePositives << endl;
+    }
     
     // Save weights
     fNeuralNetwork->SaveWeights(fWeightsFileName);
@@ -1582,7 +1481,6 @@ void PhotonTriggerML::SaveAndDisplaySummary()
     if (fOutputFile) {
         fOutputFile->cd();
         
-        // Write tree
         if (fMLTree) {
             fMLTree->Write();
             cout << "Wrote " << fMLTree->GetEntries() << " entries to tree" << endl;
@@ -1620,11 +1518,46 @@ void PhotonTriggerML::SaveAndDisplaySummary()
 
 VModule::ResultFlag PhotonTriggerML::Finish()
 {
-    INFO("PhotonTriggerML::Finish() - Normal completion (RADICAL VERSION)");
+    INFO("PhotonTriggerML::Finish() - Normal completion");
     
     SaveAndDisplaySummary();
     
     return eSuccess;
+}
+
+bool PhotonTriggerML::ExtractTraceData(const sevt::PMT& pmt, std::vector<double>& trace_data)
+{
+    trace_data.clear();
+    
+    // Try direct FADC trace
+    if (pmt.HasFADCTrace()) {
+        try {
+            const auto& trace = pmt.GetFADCTrace(sdet::PMTConstants::eHighGain);
+            for (int i = 0; i < 2048; i++) {
+                trace_data.push_back(trace[i]);
+            }
+            return true;
+        } catch (...) {}
+    }
+    
+    // Try simulation data
+    if (pmt.HasSimData()) {
+        try {
+            const sevt::PMTSimData& simData = pmt.GetSimData();
+            if (simData.HasFADCTrace(sevt::StationConstants::eTotal)) {
+                const auto& fadcTrace = simData.GetFADCTrace(
+                    sdet::PMTConstants::eHighGain,
+                    sevt::StationConstants::eTotal
+                );
+                for (int i = 0; i < 2048; i++) {
+                    trace_data.push_back(fadcTrace[i]);
+                }
+                return true;
+            }
+        } catch (...) {}
+    }
+    
+    return false;
 }
 
 bool PhotonTriggerML::GetMLResultForStation(int stationId, MLResult& result)
@@ -1640,9 +1573,4 @@ bool PhotonTriggerML::GetMLResultForStation(int stationId, MLResult& result)
 void PhotonTriggerML::ClearMLResults()
 {
     fMLResultsMap.clear();
-}
-
-void PhotonTriggerML::WriteMLAnalysisToLog()
-{
-    // Optional: Add detailed analysis logging if needed
 }

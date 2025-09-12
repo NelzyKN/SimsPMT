@@ -1,24 +1,69 @@
 <?xml version="1.0" encoding="iso-8859-1"?>
 
-<!-- Configuration of PhotonTriggerML Module -->
-<PhotonTriggerML>
+<!-- Configuration of PhotonTriggerML Module (Balanced Version) -->
 
-  <!-- Energy range where we evaluate stations -->
+<PhotonTriggerML
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:noNamespaceSchemaLocation='@SCHEMALOCATION@/PhotonTriggerML.xsd'>
+
+  <!-- Energy range for trigger application -->
   <EnergyMin unit="eV"> 1e18 </EnergyMin>
   <EnergyMax unit="eV"> 1e19 </EnergyMax>
 
-  <!-- Base threshold before auto-calibration (kept for logging & startup) -->
-  <PhotonThreshold> 0.60 </PhotonThreshold>
+  <!-- Initial threshold for photon classification (will be dynamically adjusted) -->
+  <PhotonThreshold> 0.5 </PhotonThreshold>
 
-  <!-- Output ROOT file name -->
-  <OutputFile> photon_trigger_ml_physics.root </OutputFile>
+  <!-- Output file for ML analysis results -->
+  <OutputFile> photon_trigger_ml_balanced.root </OutputFile>
 
-  <!-- Whether to load weights if present -->
-  <LoadPretrainedWeights> true </LoadPretrainedWeights>
-
-  <!-- Keep logging & diagnostics on -->
+  <!-- Save detailed features for analysis -->
   <SaveFeatures> true </SaveFeatures>
+
+  <!-- Apply trigger decision to events -->
   <ApplyTrigger> true </ApplyTrigger>
 
-</PhotonTriggerML>
+  <!-- Training parameters (optional, can be adjusted) -->
+  <TrainingParameters>
+    <BatchSize> 64 </BatchSize>
+    <LearningRate> 0.001 </LearningRate>
+    <LearningRateDecay> 0.99 </LearningRateDecay>
+    <TrainingEpochs> 200 </TrainingEpochs>
+    <PatienceEpochs> 20 </PatienceEpochs>
+    <DropoutRate> 0.3 </DropoutRate>
+    <L2Regularization> 0.0001 </L2Regularization>
+  </TrainingParameters>
 
+  <!-- Network architecture (optional) -->
+  <NetworkArchitecture>
+    <InputSize> 20 </InputSize>
+    <HiddenLayers>
+      <Layer> 32 </Layer>
+      <Layer> 24 </Layer>
+      <Layer> 16 </Layer>
+    </HiddenLayers>
+  </NetworkArchitecture>
+
+  <!-- Weights file for saving/loading trained model -->
+  <WeightsFile> photon_trigger_weights_balanced.txt </WeightsFile>
+
+  <!-- Load pre-trained weights if available -->
+  <LoadPretrainedWeights> false </LoadPretrainedWeights>
+
+  <!-- Buffer sizes for training data -->
+  <MaxPhotonBuffer> 5000 </MaxPhotonBuffer>
+  <MaxHadronBuffer> 5000 </MaxHadronBuffer>
+
+  <!-- Validation split ratio -->
+  <ValidationSplit> 0.1 </ValidationSplit>
+
+  <!-- Enable synthetic sample generation (SMOTE) -->
+  <UseSyntheticSamples> true </UseSyntheticSamples>
+
+  <!-- Enable dynamic threshold adjustment -->
+  <DynamicThreshold> true </DynamicThreshold>
+
+  <!-- Logging configuration -->
+  <LogFile> photon_trigger_ml_balanced.log </LogFile>
+  <VerboseLogging> true </VerboseLogging>
+
+</PhotonTriggerML>
