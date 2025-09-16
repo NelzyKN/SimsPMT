@@ -840,6 +840,13 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
     
     // Sophisticated training strategy
     if (fEventCount % 10 == 0 && !fHadronFeatures.empty()) {
+        // DIAGNOSTIC: Print training info
+        if (fEventCount % 50 == 0) {
+            cout << "\n=== TRAINING DIAGNOSTIC at Event " << fEventCount << " ===" << endl;
+            cout << "Hadron Features Buffer: " << fHadronFeatures.size() << " samples" << endl;
+            cout << "Photon Features Buffer: " << fPhotonFeatures.size() << " samples" << endl;
+        }
+        
         // Prepare training batch
         int batch_size = min(256, (int)fHadronFeatures.size());
         std::vector<std::vector<double>> batch;
@@ -856,26 +863,89 @@ VModule::ResultFlag PhotonTriggerML::Run(Event& event)
         double base_lr = 0.001;
         double learning_rate = base_lr * exp(-fEventCount / 2000.0);  // Slower decay
         
+        // DIAGNOSTIC: Check reconstruction errors before training
+        double error_before = 0;
+        for (int i = 0; i < min(10, (int)batch.size()); i++) {
+            error_before += fAutoencoder->GetReconstructionError(batch[i]);
+        }
+        error_before /= min(10, (int)batch.size());
+        
         for (int iter = 0; iter < 3; ++iter) {
             fAutoencoder->Train(batch, learning_rate);
         }
         
+        // DIAGNOSTIC: Check reconstruction errors after training
+        double error_after = 0;
+        for (int i = 0; i < min(10, (int)batch.size()); i++) {
+            error_after += fAutoencoder->GetReconstructionError(batch[i]);
+        }
+        error_after /= min(10, (int)batch.size());
+        
+        if (fEventCount % 50 == 0) {
+            cout << "Training Effect: " << error_before << " -> " << error_after 
+                 << " (LR: " << learning_rate << ")" << endl;
+        }
+        
         // Update threshold dynamically
         if (fDynamicThresholdEnabled && fEventCount % 50 == 0) {
+            double old_threshold = fCurrentThreshold;
+            
             // Adjust percentile based on performance
             double recall = (fTruePositives + fFalseNegatives > 0) ? 
                           (double)fTruePositives / (fTruePositives + fFalseNegatives) : 0;
             
-            if (recall < 0.10 && fTargetPercentile > 0.70) {
-                fTargetPercentile -= 0.02;  // Lower threshold to catch more photons
+            cout << "Current Recall: " << (recall * 100) << "%" << endl;
+            cout << "Target Percentile: " << (fTargetPercentile * 100) << "%" << endl;
+            
+            // More aggressive threshold adjustment
+            if (recall < 0.05 && fTargetPercentile > 0.50) {  // If recall < 5%
+                fTargetPercentile -= 0.05;  // Bigger adjustment
+                cout << "  LOW RECALL: Adjusting percentile down to " << (fTargetPercentile * 100) << "%" << endl;
+            } else if (recall < 0.10 && fTargetPercentile > 0.60) {
+                fTargetPercentile -= 0.02;
                 cout << "  Adjusting percentile down to " << (fTargetPercentile * 100) << "%" << endl;
             } else if (recall > 0.30 && fTargetPercentile < 0.95) {
-                fTargetPercentile += 0.01;  // Raise threshold to reduce false positives
+                fTargetPercentile += 0.01;
                 cout << "  Adjusting percentile up to " << (fTargetPercentile * 100) << "%" << endl;
+            }
+            
+            // Calculate error distribution for threshold update
+            cout << "Calculating threshold from " << fHadronFeatures.size() << " hadron samples..." << endl;
+            std::vector<double> sample_errors;
+            for (int i = 0; i < min(1000, (int)fHadronFeatures.size()); i += 10) {
+                sample_errors.push_back(fAutoencoder->GetReconstructionError(fHadronFeatures[i]));
+            }
+            
+            if (!sample_errors.empty()) {
+                std::sort(sample_errors.begin(), sample_errors.end());
+                cout << "Error distribution (hadrons):" << endl;
+                cout << "  Min: " << sample_errors.front() << endl;
+                cout << "  25%: " << sample_errors[sample_errors.size()/4] << endl;
+                cout << "  50%: " << sample_errors[sample_errors.size()/2] << endl;
+                cout << "  75%: " << sample_errors[3*sample_errors.size()/4] << endl;
+                cout << "  Max: " << sample_errors.back() << endl;
+                
+                // Also check photon errors if available
+                if (!fPhotonFeatures.empty()) {
+                    std::vector<double> photon_errors;
+                    for (int i = 0; i < min(100, (int)fPhotonFeatures.size()); i++) {
+                        photon_errors.push_back(fAutoencoder->GetReconstructionError(fPhotonFeatures[i]));
+                    }
+                    if (!photon_errors.empty()) {
+                        std::sort(photon_errors.begin(), photon_errors.end());
+                        cout << "Error distribution (photons):" << endl;
+                        cout << "  Min: " << photon_errors.front() << endl;
+                        cout << "  50%: " << photon_errors[photon_errors.size()/2] << endl;
+                        cout << "  Max: " << photon_errors.back() << endl;
+                    }
+                }
             }
             
             fAutoencoder->UpdateThreshold(fHadronFeatures, fTargetPercentile);
             fCurrentThreshold = fAutoencoder->GetThreshold();
+            
+            cout << "THRESHOLD UPDATE: " << old_threshold << " -> " << fCurrentThreshold << endl;
+            
             hThresholdEvolution->SetBinContent(fEventCount/10, fCurrentThreshold);
         }
     }
@@ -948,6 +1018,64 @@ void PhotonTriggerML::ProcessStation(const sevt::Station& station)
         
         // Determine if it's an anomaly (potential photon)
         fIsAnomaly = (fReconstructionError > fCurrentThreshold);
+        
+        // DIAGNOSTIC: Track reconstruction errors by particle type
+        static int photon_samples = 0;
+        static int hadron_samples = 0;
+        static double photon_error_sum = 0;
+        static double hadron_error_sum = 0;
+        static double photon_error_min = 1e9;
+        static double photon_error_max = 0;
+        static double hadron_error_min = 1e9;
+        static double hadron_error_max = 0;
+        
+        if (fIsActualPhoton) {
+            photon_samples++;
+            photon_error_sum += fReconstructionError;
+            photon_error_min = min(photon_error_min, fReconstructionError);
+            photon_error_max = max(photon_error_max, fReconstructionError);
+        } else {
+            hadron_samples++;
+            hadron_error_sum += fReconstructionError;
+            hadron_error_min = min(hadron_error_min, fReconstructionError);
+            hadron_error_max = max(hadron_error_max, fReconstructionError);
+        }
+        
+        // Print detailed diagnostics every 1000 stations
+        if (fStationCount % 1000 == 0 && fStationCount > 0) {
+            cout << "\n=== DIAGNOSTIC at Station " << fStationCount << " ===" << endl;
+            cout << "Current Threshold: " << fCurrentThreshold << endl;
+            
+            if (photon_samples > 0) {
+                cout << "PHOTON Stats (" << photon_samples << " samples):" << endl;
+                cout << "  Avg Error: " << photon_error_sum / photon_samples << endl;
+                cout << "  Min/Max: " << photon_error_min << " / " << photon_error_max << endl;
+                cout << "  Above Threshold: " << (photon_error_sum / photon_samples > fCurrentThreshold ? "YES" : "NO") << endl;
+            }
+            
+            if (hadron_samples > 0) {
+                cout << "HADRON Stats (" << hadron_samples << " samples):" << endl;
+                cout << "  Avg Error: " << hadron_error_sum / hadron_samples << endl;
+                cout << "  Min/Max: " << hadron_error_min << " / " << hadron_error_max << endl;
+            }
+            
+            // Print feature statistics for current sample
+            cout << "\nCurrent Sample (" << fPrimaryType << "):" << endl;
+            cout << "  Reconstruction Error: " << fReconstructionError << endl;
+            cout << "  Is Anomaly: " << (fIsAnomaly ? "YES" : "NO") << endl;
+            cout << "  Key Features (first 5):" << endl;
+            for (int i = 0; i < min(5, (int)features.size()); i++) {
+                cout << "    F" << i << ": " << features[i] 
+                     << " (norm: " << normalized_features[i] << ")" << endl;
+            }
+            
+            // Check if autoencoder weights are updating
+            static double last_threshold = 0;
+            if (abs(fCurrentThreshold - last_threshold) > 0.001) {
+                cout << "  THRESHOLD CHANGED: " << last_threshold << " -> " << fCurrentThreshold << endl;
+                last_threshold = fCurrentThreshold;
+            }
+        }
         
         // Store ML result for PMTTraceModule compatibility
         MLResult mlResult;
