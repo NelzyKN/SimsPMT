@@ -1014,8 +1014,8 @@ std::vector<double> PhotonTriggerML::ExtractComprehensiveFeatures(const std::vec
     const double baseline = 50.0;
     
     // Safety check for trace size
-    if (trace.size() < 100) {
-        // Return empty features if trace is too small
+    if (trace.empty() || trace.size() < 100) {
+        // Return default features if trace is too small
         features.resize(25, 0.0);
         return features;
     }
@@ -1041,19 +1041,27 @@ std::vector<double> PhotonTriggerML::ExtractComprehensiveFeatures(const std::vec
         }
     }
     
+    // If no signal found, return default features
+    if (total_signal <= 0 || peak_value <= 0) {
+        features.resize(25, 0.0);
+        return features;
+    }
+    
     // 1-3. Peak characteristics
     features.push_back(peak_value / 1000.0);  // Normalized peak
     features.push_back(total_signal / 10000.0);  // Normalized total charge
-    features.push_back(peak_bin / 2048.0);  // Normalized peak position
+    features.push_back(static_cast<double>(peak_bin) / static_cast<double>(trace.size()));  // Normalized peak position
     
     // 4-6. Time characteristics
     int rise_10 = peak_bin, rise_90 = peak_bin;
     for (int i = peak_bin; i >= 0; i--) {
-        double val = trace[i] - baseline;
-        if (val < 0.9 * peak_value && rise_90 == peak_bin) rise_90 = i;
-        if (val < 0.1 * peak_value) {
-            rise_10 = i;
-            break;
+        if (i < (int)trace.size()) {
+            double val = trace[i] - baseline;
+            if (val < 0.9 * peak_value && rise_90 == peak_bin) rise_90 = i;
+            if (val < 0.1 * peak_value) {
+                rise_10 = i;
+                break;
+            }
         }
     }
     
@@ -1067,14 +1075,18 @@ std::vector<double> PhotonTriggerML::ExtractComprehensiveFeatures(const std::vec
         }
     }
     
-    features.push_back((rise_90 - rise_10) / 100.0);  // Rise time
-    features.push_back((fall_10 - fall_90) / 100.0);  // Fall time
-    features.push_back((fall_10 - fall_90 - (rise_90 - rise_10)) / 
-                      ((fall_10 - fall_90) + (rise_90 - rise_10) + 1));  // Asymmetry
+    double rise_time = abs(rise_90 - rise_10) / 100.0;
+    double fall_time = abs(fall_10 - fall_90) / 100.0;
+    double rise_fall_sum = rise_time + fall_time + 0.001;  // Prevent division by zero
+    double asymmetry = (fall_time - rise_time) / rise_fall_sum;
+    
+    features.push_back(rise_time);  // Rise time
+    features.push_back(fall_time);  // Fall time
+    features.push_back(asymmetry);  // Asymmetry
     
     // 7-9. FWHM and signal duration
     int half_rise = rise_10, half_fall = fall_10;
-    for (int i = rise_10; i <= peak_bin; i++) {
+    for (int i = rise_10; i <= peak_bin && i < (int)trace.size(); i++) {
         if (trace[i] - baseline >= 0.5 * peak_value) {
             half_rise = i;
             break;
@@ -1088,39 +1100,55 @@ std::vector<double> PhotonTriggerML::ExtractComprehensiveFeatures(const std::vec
     }
     
     features.push_back((half_fall - half_rise) / 100.0);  // FWHM
-    features.push_back((last_bin - first_bin) / 1000.0);  // Signal duration
-    features.push_back(sqrt(total_squared / (total_signal + 1)) / 100.0);  // RMS
+    features.push_back((last_bin > first_bin) ? (last_bin - first_bin) / 1000.0 : 0.0);  // Signal duration
+    double rms = (total_signal > 0) ? sqrt(total_squared / total_signal) / 100.0 : 0.0;
+    features.push_back(rms);  // RMS
     
     // 10-14. Charge distribution in time windows
     double early_charge = 0, peak_charge = 0, late_charge = 0;
     double very_early = 0, very_late = 0;
     
-    for (int i = 0; i < 256; i++) {
+    int window_size = trace.size() / 8;  // Dynamic window sizing
+    
+    // Very early window
+    for (int i = 0; i < min(window_size, (int)trace.size()); i++) {
         double val = trace[i] - baseline;
         if (val > 0) very_early += val;
     }
-    for (int i = 256; i < 768; i++) {
+    
+    // Early window
+    for (int i = window_size; i < min(3 * window_size, (int)trace.size()); i++) {
         double val = trace[i] - baseline;
         if (val > 0) early_charge += val;
     }
-    for (int i = max(0, peak_bin - 100); i < min(2048, peak_bin + 100); i++) {
+    
+    // Peak window
+    int peak_start = max(0, peak_bin - 100);
+    int peak_end = min((int)trace.size(), peak_bin + 100);
+    for (int i = peak_start; i < peak_end; i++) {
         double val = trace[i] - baseline;
         if (val > 0) peak_charge += val;
     }
-    for (int i = 1280; i < 1792; i++) {
+    
+    // Late window
+    for (int i = 5 * window_size; i < min(7 * window_size, (int)trace.size()); i++) {
         double val = trace[i] - baseline;
         if (val > 0) late_charge += val;
     }
-    for (int i = 1792; i < 2048; i++) {
+    
+    // Very late window
+    for (int i = max(0, (int)trace.size() - window_size); i < (int)trace.size(); i++) {
         double val = trace[i] - baseline;
         if (val > 0) very_late += val;
     }
     
-    features.push_back(very_early / (total_signal + 1));
-    features.push_back(early_charge / (total_signal + 1));
-    features.push_back(peak_charge / (total_signal + 1));
-    features.push_back(late_charge / (total_signal + 1));
-    features.push_back(very_late / (total_signal + 1));
+    // Add small value to total_signal to prevent division by zero
+    double safe_total = total_signal + 0.001;
+    features.push_back(very_early / safe_total);
+    features.push_back(early_charge / safe_total);
+    features.push_back(peak_charge / safe_total);
+    features.push_back(late_charge / safe_total);
+    features.push_back(very_late / safe_total);
     
     // 15-17. Statistical moments
     double mean_time = 0;
@@ -1128,22 +1156,22 @@ std::vector<double> PhotonTriggerML::ExtractComprehensiveFeatures(const std::vec
         double val = max(0.0, trace[i] - baseline);
         mean_time += i * val;
     }
-    mean_time /= (total_signal + 1);
+    mean_time = (total_signal > 0) ? mean_time / total_signal : static_cast<double>(peak_bin);
     
     double variance = 0, skewness = 0, kurtosis = 0;
     for (size_t i = 0; i < trace.size(); i++) {
         double val = max(0.0, trace[i] - baseline);
         double diff = i - mean_time;
-        double weight = val / (total_signal + 1);
+        double weight = (total_signal > 0) ? val / total_signal : 0.0;
         variance += diff * diff * weight;
         skewness += diff * diff * diff * weight;
         kurtosis += diff * diff * diff * diff * weight;
     }
     
-    double std_dev = sqrt(variance);
+    double std_dev = sqrt(variance + 0.001);  // Add small value to prevent zero
     features.push_back(variance / 10000.0);
-    features.push_back((std_dev > 0) ? skewness / (std_dev * std_dev * std_dev) : 0);
-    features.push_back((variance > 0) ? kurtosis / (variance * variance) - 3.0 : 0);
+    features.push_back((std_dev > 0.001) ? skewness / (std_dev * std_dev * std_dev) : 0.0);
+    features.push_back((variance > 0.001) ? (kurtosis / (variance * variance)) - 3.0 : 0.0);
     
     // 18-20. Signal quality metrics
     double smoothness = 0;
@@ -1219,8 +1247,8 @@ std::vector<double> PhotonTriggerML::ExtractComprehensiveFeatures(const std::vec
     features.push_back(mid_freq / 1000.0);
     features.push_back(high_freq / 1000.0);
     
-    // Ratio of peak to total
-    features.push_back(peak_value / (total_signal + 1));
+    // Ratio of peak to total (protect against division by zero)
+    features.push_back((total_signal > 0) ? peak_value / total_signal : 1.0);
     
     // Number of peaks (simplified)
     int n_peaks = 0;
