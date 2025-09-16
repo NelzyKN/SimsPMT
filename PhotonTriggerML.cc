@@ -1013,6 +1013,13 @@ std::vector<double> PhotonTriggerML::ExtractComprehensiveFeatures(const std::vec
     std::vector<double> features;
     const double baseline = 50.0;
     
+    // Safety check for trace size
+    if (trace.size() < 100) {
+        // Return empty features if trace is too small
+        features.resize(25, 0.0);
+        return features;
+    }
+    
     // Find peak and basic statistics
     int peak_bin = 0;
     double peak_value = 0;
@@ -1165,30 +1172,46 @@ std::vector<double> PhotonTriggerML::ExtractComprehensiveFeatures(const std::vec
     double low_freq = 0, mid_freq = 0, high_freq = 0;
     
     // Low frequency: changes over >100 bins
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 19; i++) {  // Changed from 20 to 19 to prevent overflow
+        int start1 = i * 100;
+        int end1 = min((i + 1) * 100, (int)trace.size());
+        int start2 = (i + 1) * 100;
+        int end2 = min((i + 2) * 100, (int)trace.size());
+        
+        if (start2 >= (int)trace.size()) break;
+        
         double sum1 = 0, sum2 = 0;
-        for (int j = i * 100; j < min((i + 1) * 100, 2048); j++) {
+        for (int j = start1; j < end1; j++) {
             sum1 += trace[j] - baseline;
         }
-        for (int j = (i + 1) * 100; j < min((i + 2) * 100, 2048); j++) {
+        for (int j = start2; j < end2; j++) {
             sum2 += trace[j] - baseline;
         }
         low_freq += abs(sum2 - sum1);
     }
     
     // Mid frequency: changes over 10-50 bins
-    for (int i = peak_bin - 200; i < peak_bin + 200 && i < 1998; i += 10) {
-        if (i < 0) continue;
+    int mid_start = max(0, peak_bin - 200);
+    int mid_end = min((int)trace.size() - 50, peak_bin + 200);
+    
+    for (int i = mid_start; i < mid_end; i += 10) {
+        if (i + 50 >= (int)trace.size()) break;
+        
         double sum1 = 0, sum2 = 0;
-        for (int j = 0; j < 25; j++) {
+        for (int j = 0; j < 25 && (i + j) < (int)trace.size(); j++) {
             sum1 += trace[i + j] - baseline;
-            sum2 += trace[i + j + 25] - baseline;
+        }
+        for (int j = 25; j < 50 && (i + j) < (int)trace.size(); j++) {
+            sum2 += trace[i + j] - baseline;
         }
         mid_freq += abs(sum2 - sum1);
     }
     
     // High frequency: bin-to-bin changes
-    for (int i = max(0, peak_bin - 100); i < min(2047, peak_bin + 100); i++) {
+    int high_start = max(0, peak_bin - 100);
+    int high_end = min((int)trace.size() - 1, peak_bin + 100);
+    
+    for (int i = high_start; i < high_end; i++) {
         high_freq += abs(trace[i + 1] - trace[i]);
     }
     
@@ -1201,7 +1224,7 @@ std::vector<double> PhotonTriggerML::ExtractComprehensiveFeatures(const std::vec
     
     // Number of peaks (simplified)
     int n_peaks = 0;
-    for (int i = 10; i < 2038; i++) {
+    for (int i = 10; i < (int)trace.size() - 10; i++) {
         if (trace[i] > trace[i-1] && trace[i] > trace[i+1] && 
             trace[i] - baseline > 0.1 * peak_value) {
             n_peaks++;
