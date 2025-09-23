@@ -1,18 +1,31 @@
 #ifndef _PhotonTriggerML_h_
 #define _PhotonTriggerML_h_
 
+/**
+ * \file PhotonTriggerML.h
+ * \brief Machine Learning based photon trigger for Pierre Auger Observatory
+ * 
+ * This module uses supervised learning to discriminate between photon-induced
+ * and hadron-induced air showers based on PMT trace characteristics.
+ * Focus is on time/shape features that are energy-independent.
+ */
+
 #include <fwk/VModule.h>
 #include <vector>
 #include <string>
 #include <memory>
 #include <fstream>
 #include <map>
+#include <deque>
+#include <cstring>
+#include <algorithm>
 
 // Forward declarations
 class TFile;
 class TTree;
 class TH1D;
 class TH2D;
+class TProfile;
 
 namespace evt { class Event; }
 namespace sevt { 
@@ -51,6 +64,7 @@ public:
             double peak_charge_ratio;
             double kurtosis;
             double total_charge;
+            double muon_fraction;  // Key discriminator
         } features;
         
         MLResult() : photonScore(0), identifiedAsPhoton(false), 
@@ -62,147 +76,154 @@ public:
     static bool GetMLResultForStation(int stationId, MLResult& result);
     static void ClearMLResults();
     
+private:
     /**
-     * \class Autoencoder
-     * \brief Deep autoencoder for anomaly detection
+     * \struct PhysicsFeatures
+     * \brief Physics-motivated features for photon/hadron discrimination
      */
-    class Autoencoder {
-    public:
-        Autoencoder();
-        ~Autoencoder() = default;
+    struct PhysicsFeatures {
+        // Time profile features (normalized, energy-independent)
+        double rise_time_norm;       // Rise time 10-90% normalized
+        double fall_time_norm;       // Fall time 90-10% normalized
+        double pulse_asymmetry;      // (fall - rise) / (fall + rise)
+        double fwhm_norm;            // Full width half max normalized
         
-        void Initialize(int input_size);
-        double GetReconstructionError(const std::vector<double>& features);
-        void Train(const std::vector<std::vector<double>>& features, double learning_rate);
-        void UpdateThreshold(const std::vector<std::vector<double>>& hadron_features, 
-                           double percentile = 0.85);
-        double GetThreshold() const { return fAnomalyThreshold; }
+        // Charge distribution features (fractions, not absolute)
+        double very_early_fraction;  // Charge before peak-500 bins
+        double early_fraction;        // Charge peak-500 to peak-200
+        double peak_fraction;         // Charge peak-200 to peak+200
+        double late_fraction;         // Charge peak+200 to peak+500
+        double very_late_fraction;    // Charge after peak+500 (MUON INDICATOR)
         
-    private:
-        int fInputSize;
-        int fLatentSize;
-        bool fInitialized;
-        int fTrainingStep;
+        // Shape features
+        double time_rms_norm;         // RMS of time distribution
+        double time_skewness;         // 3rd moment
+        double time_kurtosis;         // 4th moment
+        double smoothness;            // Signal smoothness (2nd derivative)
         
-        // Deep encoder weights and biases (4 layers)
-        std::vector<std::vector<double>> fEncoderWeights1;
-        std::vector<double> fEncoderBias1;
-        std::vector<std::vector<double>> fEncoderWeights2;
-        std::vector<double> fEncoderBias2;
-        std::vector<std::vector<double>> fEncoderWeights3;
-        std::vector<double> fEncoderBias3;
-        std::vector<std::vector<double>> fEncoderWeights4;
-        std::vector<double> fEncoderBias4;
+        // Muon-specific indicators
+        double muon_bump_score;       // Presence of late muon bump
+        double n_sub_peaks;           // Number of secondary peaks
+        double late_to_early_ratio;   // very_late / early charge
         
-        // Deep decoder weights and biases (4 layers)
-        std::vector<std::vector<double>> fDecoderWeights1;
-        std::vector<double> fDecoderBias1;
-        std::vector<std::vector<double>> fDecoderWeights2;
-        std::vector<double> fDecoderBias2;
-        std::vector<std::vector<double>> fDecoderWeights3;
-        std::vector<double> fDecoderBias3;
-        std::vector<std::vector<double>> fDecoderWeights4;
-        std::vector<double> fDecoderBias4;
+        // Signal quality
+        double snr_estimate;          // Signal to noise ratio
         
-        // Adam optimizer momentum and velocity for encoder
-        std::vector<std::vector<double>> fEncoderMomentum1;
-        std::vector<std::vector<double>> fEncoderVelocity1;
-        std::vector<std::vector<double>> fEncoderMomentum2;
-        std::vector<std::vector<double>> fEncoderVelocity2;
-        std::vector<std::vector<double>> fEncoderMomentum3;
-        std::vector<std::vector<double>> fEncoderVelocity3;
-        std::vector<std::vector<double>> fEncoderMomentum4;
-        std::vector<std::vector<double>> fEncoderVelocity4;
-        
-        // Adam optimizer for encoder biases
-        std::vector<double> fEncoderBiasMomentum1;
-        std::vector<double> fEncoderBiasVelocity1;
-        std::vector<double> fEncoderBiasMomentum2;
-        std::vector<double> fEncoderBiasVelocity2;
-        std::vector<double> fEncoderBiasMomentum3;
-        std::vector<double> fEncoderBiasVelocity3;
-        std::vector<double> fEncoderBiasMomentum4;
-        std::vector<double> fEncoderBiasVelocity4;
-        
-        // Adam optimizer momentum and velocity for decoder
-        std::vector<std::vector<double>> fDecoderMomentum1;
-        std::vector<std::vector<double>> fDecoderVelocity1;
-        std::vector<std::vector<double>> fDecoderMomentum2;
-        std::vector<std::vector<double>> fDecoderVelocity2;
-        std::vector<std::vector<double>> fDecoderMomentum3;
-        std::vector<std::vector<double>> fDecoderVelocity3;
-        std::vector<std::vector<double>> fDecoderMomentum4;
-        std::vector<std::vector<double>> fDecoderVelocity4;
-        
-        // Adam optimizer for decoder biases
-        std::vector<double> fDecoderBiasMomentum1;
-        std::vector<double> fDecoderBiasVelocity1;
-        std::vector<double> fDecoderBiasMomentum2;
-        std::vector<double> fDecoderBiasVelocity2;
-        std::vector<double> fDecoderBiasMomentum3;
-        std::vector<double> fDecoderBiasVelocity3;
-        std::vector<double> fDecoderBiasMomentum4;
-        std::vector<double> fDecoderBiasVelocity4;
-        
-        // Compatibility with original simple version
-        std::vector<std::vector<double>> fEncoderWeights;
-        std::vector<double> fEncoderBias;
-        std::vector<std::vector<double>> fDecoderWeights;
-        std::vector<double> fDecoderBias;
-        std::vector<std::vector<double>> fEncoderMomentum;
-        std::vector<std::vector<double>> fDecoderMomentum;
-        
-        double fAnomalyThreshold;
-        
-        // Helper activation functions
-        double relu(double x);
-        double reluDerivative(double x);
-        double sigmoid(double x);
-        double sigmoidDerivative(double y);
-        double tanhDerivative(double y);
-        
-        // Adam optimizer update functions
-        void updateWeightsAdam(std::vector<std::vector<double>>& weights,
-                              const std::vector<double>& gradients,
-                              const std::vector<double>& inputs,
-                              std::vector<std::vector<double>>& momentum,
-                              std::vector<std::vector<double>>& velocity,
-                              double lr, double beta1, double beta2, double epsilon);
-        
-        void updateBiasAdam(std::vector<double>& bias,
-                           const std::vector<double>& gradients,
-                           std::vector<double>& momentum,
-                           std::vector<double>& velocity,
-                           double lr, double beta1, double beta2, double epsilon);
+        // Constructor
+        PhysicsFeatures() { std::memset(this, 0, sizeof(PhysicsFeatures)); }
     };
     
-private:
+    /**
+     * \class SimpleNeuralNet
+     * \brief Lightweight neural network for photon classification
+     */
+    class SimpleNeuralNet {
+    public:
+        SimpleNeuralNet();
+        void Initialize(int input_size);
+        double Predict(const std::vector<double>& features);
+        void Train(const std::vector<double>& features, bool is_photon, double lr = 0.001);
+        void UpdateWeights(const std::vector<std::pair<std::vector<double>, bool>>& batch);
+        bool SaveWeights(const std::string& filename);
+        bool LoadWeights(const std::string& filename);
+        
+    private:
+        // Network architecture: input -> hidden1 -> hidden2 -> output
+        std::vector<std::vector<double>> fWeights1;  // input to hidden1
+        std::vector<double> fBias1;
+        std::vector<std::vector<double>> fWeights2;  // hidden1 to hidden2  
+        std::vector<double> fBias2;
+        std::vector<std::vector<double>> fWeights3;  // hidden2 to output
+        std::vector<double> fBias3;
+        
+        int fInputSize;
+        int fHidden1Size;
+        int fHidden2Size;
+        bool fInitialized;
+        
+        // Activation functions
+        double sigmoid(double x) { return 1.0 / (1.0 + exp(-x)); }
+        double relu(double x) { return x > 0 ? x : 0.01 * x; }  // Leaky ReLU
+        double sigmoidDerivative(double y) { return y * (1 - y); }
+        double reluDerivative(double x) { return x > 0 ? 1.0 : 0.01; }
+    };
+    
+    /**
+     * \class EnsembleClassifier
+     * \brief Ensemble of multiple classifiers for robust detection
+     */
+    class EnsembleClassifier {
+    public:
+        EnsembleClassifier();
+        void Initialize();
+        double Predict(const PhysicsFeatures& features);
+        void AddTrainingSample(const PhysicsFeatures& features, bool is_photon);
+        void Train();
+        void UpdateThreshold(double target_efficiency);
+        
+    private:
+        // Individual classifier scores
+        double MuonContentScore(const PhysicsFeatures& f);
+        double TimeProfileScore(const PhysicsFeatures& f);
+        double ShapeScore(const PhysicsFeatures& f);
+        
+        // Ensemble weights
+        double fMuonWeight;
+        double fTimeWeight;
+        double fShapeWeight;
+        
+        // Dynamic threshold
+        double fThreshold;
+        
+        // Training samples
+        std::vector<std::pair<PhysicsFeatures, bool>> fTrainingSamples;
+        
+        // Simple statistics for threshold tuning
+        std::vector<double> fPhotonScores;
+        std::vector<double> fHadronScores;
+    };
+    
+    // Processing methods
     void ProcessStation(const sevt::Station& station);
-    std::vector<double> ExtractSimplifiedFeatures(const std::vector<double>& trace);
-    std::vector<double> ExtractComprehensiveFeatures(const std::vector<double>& trace);
-    void UpdateFeatureStatistics(const std::vector<double>& features);
-    std::vector<double> NormalizeFeatures(const std::vector<double>& features);
-    void CalculateAndDisplayMetrics();
+    PhysicsFeatures ExtractPhysicsFeatures(const std::vector<double>& trace);
     bool ExtractTraceData(const sevt::PMT& pmt, std::vector<double>& trace_data);
-    MLResult::Features ExtractCompatibilityFeatures(const std::vector<double>& trace);
+    void UpdatePerformanceMetrics(bool is_photon, bool predicted_photon);
     
-    // Autoencoder
-    std::unique_ptr<Autoencoder> fAutoencoder;
+    // Classifiers
+    std::unique_ptr<SimpleNeuralNet> fNeuralNet;
+    std::unique_ptr<EnsembleClassifier> fEnsemble;
     
-    // Training data
-    std::vector<std::vector<double>> fHadronFeatures;
-    std::vector<std::vector<double>> fPhotonFeatures;  // New: separate photon storage
+    // Training data management
+    struct TrainingBuffer {
+        std::deque<std::pair<std::vector<double>, bool>> samples;
+        size_t max_size;
+        
+        TrainingBuffer(size_t max = 10000) : max_size(max) {}
+        
+        void Add(const std::vector<double>& features, bool is_photon) {
+            samples.push_back({features, is_photon});
+            if (samples.size() > max_size) {
+                samples.pop_front();
+            }
+        }
+        
+        size_t PhotonCount() const {
+            return std::count_if(samples.begin(), samples.end(), 
+                               [](const auto& s) { return s.second; });
+        }
+        
+        size_t HadronCount() const {
+            return samples.size() - PhotonCount();
+        }
+    };
     
-    // Feature normalization
-    std::vector<double> fFeatureMeans;
-    std::vector<double> fFeatureStds;
-    int fFeatureCount;
+    TrainingBuffer fTrainingBuffer;
     
     // Event counters
     int fEventCount;
     int fStationCount;
-    int fPhotonLikeCount;
-    int fHadronLikeCount;
+    int fPhotonEventCount;
+    int fHadronEventCount;
     
     // Current event data
     double fEnergy;
@@ -210,11 +231,9 @@ private:
     double fCoreY;
     int fPrimaryId;
     std::string fPrimaryType;
+    bool fIsActualPhoton;
     int fStationId;
     double fDistance;
-    double fReconstructionError;
-    bool fIsAnomaly;
-    bool fIsActualPhoton;
     
     // Performance metrics
     int fTruePositives;
@@ -222,33 +241,57 @@ private:
     int fTrueNegatives;
     int fFalseNegatives;
     
+    // Moving average performance
+    std::deque<double> fRecentPrecisions;
+    std::deque<double> fRecentRecalls;
+    const size_t fPerformanceWindow = 100;
+    
     // Configuration
     double fEnergyMin;
     double fEnergyMax;
+    double fPhotonThreshold;
+    double fTargetEfficiency;
+    bool fUseEnsemble;
+    bool fUseDynamicThreshold;
+    bool fSaveFeatures;
     std::string fOutputFileName;
+    std::string fWeightsFileName;
     std::string fLogFileName;
     std::ofstream fLogFile;
-    
-    // New configuration parameters
-    double fTargetPercentile;
-    double fCurrentThreshold;
-    bool fDynamicThresholdEnabled;
-    double fValidationFraction;
     
     // Output
     TFile* fOutputFile;
     TTree* fMLTree;
+    TTree* fFeatureTree;
+    
+    // Feature data for tree
+    PhysicsFeatures fCurrentFeatures;
+    double fPhotonScore;
+    bool fPredictedAsPhoton;
     
     // Histograms
-    TH1D* hReconstructionError;
-    TH1D* hErrorPhotons;
-    TH1D* hErrorHadrons;
+    TH1D* hPhotonScore;
+    TH1D* hPhotonScoreTrue;
+    TH1D* hPhotonScoreFalse;
+    TH2D* hScoreVsEnergy;
+    TH2D* hScoreVsDistance;
+    TH1D* hMuonFraction;
+    TH1D* hMuonFractionPhoton;
+    TH1D* hMuonFractionHadron;
+    TProfile* hEfficiencyVsEnergy;
+    TProfile* hPurityVsEnergy;
     TH2D* hConfusionMatrix;
-    TH1D* hThresholdEvolution;
     TH1D* hFeatureImportance;
     
     // Static ML results storage for inter-module communication
     static std::map<int, MLResult> fMLResultsMap;
+    
+    // Helper methods
+    void InitializeHistograms();
+    void FillHistograms();
+    void TrainClassifiers();
+    void UpdateDynamicThreshold();
+    double CalculateOptimalThreshold(double target_efficiency);
     
     REGISTER_MODULE("PhotonTriggerML", PhotonTriggerML);
 };

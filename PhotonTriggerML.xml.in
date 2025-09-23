@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="iso-8859-1"?>
 
-<!-- Configuration of PhotonTriggerML Module (Balanced Version) -->
+<!-- Configuration of PhotonTriggerML Module (SUPERVISED VERSION) -->
 
 <PhotonTriggerML>
 
@@ -8,60 +8,119 @@
   <EnergyMin unit="eV"> 1e18 </EnergyMin>
   <EnergyMax unit="eV"> 1e19 </EnergyMax>
 
-  <!-- Initial threshold for photon classification (will be dynamically adjusted) -->
+  <!-- Photon classification threshold (will be dynamically adjusted) -->
   <PhotonThreshold> 0.5 </PhotonThreshold>
+  
+  <!-- Target efficiency for photon detection (used for dynamic threshold) -->
+  <TargetEfficiency> 0.7 </TargetEfficiency>
 
-  <!-- Output file for ML analysis results -->
-  <OutputFile> photon_trigger_ml_balanced.root </OutputFile>
-
+  <!-- Use ensemble classifier (recommended) -->
+  <UseEnsemble> true </UseEnsemble>
+  
+  <!-- Enable dynamic threshold adjustment based on performance -->
+  <DynamicThreshold> true </DynamicThreshold>
+  
   <!-- Save detailed features for analysis -->
   <SaveFeatures> true </SaveFeatures>
 
-  <!-- Apply trigger decision to events -->
-  <ApplyTrigger> true </ApplyTrigger>
-
-  <!-- Training parameters (optional, can be adjusted) -->
-  <TrainingParameters>
-    <BatchSize> 64 </BatchSize>
-    <LearningRate> 0.001 </LearningRate>
-    <LearningRateDecay> 0.99 </LearningRateDecay>
-    <TrainingEpochs> 200 </TrainingEpochs>
-    <PatienceEpochs> 20 </PatienceEpochs>
-    <DropoutRate> 0.3 </DropoutRate>
-    <L2Regularization> 0.0001 </L2Regularization>
-  </TrainingParameters>
-
-  <!-- Network architecture (optional) -->
-  <NetworkArchitecture>
-    <InputSize> 20 </InputSize>
-    <HiddenLayers>
-      <Layer> 32 </Layer>
-      <Layer> 24 </Layer>
-      <Layer> 16 </Layer>
-    </HiddenLayers>
-  </NetworkArchitecture>
+  <!-- Output file for ML results and diagnostics -->
+  <OutputFile> photon_trigger_ml_supervised.root </OutputFile>
 
   <!-- Weights file for saving/loading trained model -->
-  <WeightsFile> photon_trigger_weights_balanced.txt </WeightsFile>
+  <WeightsFile> photon_trigger_weights_supervised.dat </WeightsFile>
+  
+  <!-- Log file for performance tracking -->
+  <LogFile> photon_trigger_ml_supervised.log </LogFile>
 
-  <!-- Load pre-trained weights if available -->
-  <LoadPretrainedWeights> false </LoadPretrainedWeights>
+  <!-- Training configuration -->
+  <TrainingParameters>
+    <!-- Learning rate for neural network (with exponential decay) -->
+    <InitialLearningRate> 0.001 </InitialLearningRate>
+    <LearningRateDecay> 0.9995 </LearningRateDecay>
+    
+    <!-- Batch size for balanced training -->
+    <BatchSize> 64 </BatchSize>
+    
+    <!-- Training frequency (every N events) -->
+    <TrainEveryNEvents> 20 </TrainEveryNEvents>
+    
+    <!-- Maximum training buffer size -->
+    <MaxBufferSize> 10000 </MaxBufferSize>
+  </TrainingParameters>
 
-  <!-- Buffer sizes for training data -->
-  <MaxPhotonBuffer> 5000 </MaxPhotonBuffer>
-  <MaxHadronBuffer> 5000 </MaxHadronBuffer>
+  <!-- Ensemble weights (physics-motivated) -->
+  <EnsembleWeights>
+    <!-- Muon content is the strongest discriminator -->
+    <MuonContentWeight> 0.5 </MuonContentWeight>
+    
+    <!-- Time profile differences -->
+    <TimeProfileWeight> 0.3 </TimeProfileWeight>
+    
+    <!-- Overall pulse shape -->
+    <PulseShapeWeight> 0.2 </PulseShapeWeight>
+  </EnsembleWeights>
 
-  <!-- Validation split ratio -->
-  <ValidationSplit> 0.1 </ValidationSplit>
+  <!-- Feature extraction parameters -->
+  <FeatureExtraction>
+    <!-- PMT baseline value -->
+    <Baseline unit="ADC"> 50 </Baseline>
+    
+    <!-- ADC to VEM conversion factor -->
+    <ADCPerVEM> 180 </ADCPerVEM>
+    
+    <!-- Time windows for charge distribution (bins relative to peak) -->
+    <VeryEarlyWindow> -2000 -500 </VeryEarlyWindow>
+    <EarlyWindow> -500 -200 </EarlyWindow>
+    <PeakWindow> -200 200 </PeakWindow>
+    <LateWindow> 200 500 </LateWindow>
+    <VeryLateWindow> 500 2000 </VeryLateWindow>
+    
+    <!-- Muon bump detection window -->
+    <MuonBumpStart> 600 </MuonBumpStart>
+    <MuonBumpEnd> 1500 </MuonBumpEnd>
+  </FeatureExtraction>
 
-  <!-- Enable synthetic sample generation (SMOTE) -->
-  <UseSyntheticSamples> true </UseSyntheticSamples>
+  <!-- Neural network architecture -->
+  <NetworkArchitecture>
+    <!-- Number of physics features -->
+    <InputSize> 18 </InputSize>
+    
+    <!-- Hidden layer sizes -->
+    <HiddenLayer1> 32 </HiddenLayer1>
+    <HiddenLayer2> 16 </HiddenLayer2>
+    
+    <!-- Activation function (relu or sigmoid) -->
+    <Activation> relu </Activation>
+    
+    <!-- Dropout rate for regularization -->
+    <DropoutRate> 0.2 </DropoutRate>
+  </NetworkArchitecture>
 
-  <!-- Enable dynamic threshold adjustment -->
-  <DynamicThreshold> true </DynamicThreshold>
+  <!-- Performance monitoring -->
+  <PerformanceMonitoring>
+    <!-- Moving average window for metrics -->
+    <PerformanceWindow> 100 </PerformanceWindow>
+    
+    <!-- Display metrics every N events -->
+    <DisplayEveryNEvents> 10 </DisplayEveryNEvents>
+    
+    <!-- Update threshold every N events -->
+    <UpdateThresholdEveryNEvents> 50 </UpdateThresholdEveryNEvents>
+  </PerformanceMonitoring>
 
-  <!-- Logging configuration -->
-  <LogFile> photon_trigger_ml_balanced.log </LogFile>
-  <VerboseLogging> true </VerboseLogging>
+  <!-- Diagnostic options -->
+  <Diagnostics>
+    <!-- Enable verbose logging -->
+    <VerboseLogging> true </VerboseLogging>
+    
+    <!-- Save confusion matrix -->
+    <SaveConfusionMatrix> true </SaveConfusionMatrix>
+    
+    <!-- Save feature importance analysis -->
+    <SaveFeatureImportance> true </SaveFeatureImportance>
+    
+    <!-- Save score distributions -->
+    <SaveScoreDistributions> true </SaveScoreDistributions>
+  </Diagnostics>
 
 </PhotonTriggerML>
